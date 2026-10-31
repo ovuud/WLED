@@ -119,6 +119,7 @@ class DigEncodersUsermod : public Usermod {
   bool   invertEnc2     = false;
   int    briStep        = 8;    // brightness change per click (encoder 1)
   int    mixStep        = 5;    // white-mix change per click, in percent (encoder 2)
+  int    whiteLevel     = 100;  // how strong the white LED is at 100% mix, relative to the colour it replaces (lower if the white looks brighter than the colour)
   int    rearPercent    = 50;   // rear brightness as a percentage of the front brightness (0/25/50/100, remembered)
   int    longPressMs    = 800;
   int    doubleClickMs  = 350;
@@ -410,6 +411,7 @@ class DigEncodersUsermod : public Usermod {
     // ---- remember state: save a few seconds after the last change (also catches changes from the web page) ----
     if (now - lastCheck > 500) {
       lastCheck = now;
+      if (Bus::getGlobalAWMode() != RGBW_MODE_MANUAL_ONLY) Bus::setGlobalAWMode(RGBW_MODE_MANUAL_ONLY);   // WLED must not compute its own white, or the white-mix knob is overridden
       uint32_t s = makeSnapshot();
       if (s != snapshot) { snapshot = s; dirty = true; lastChange = now; }
       if (dirty && now - lastChange > 5000) {
@@ -423,18 +425,24 @@ class DigEncodersUsermod : public Usermod {
   // Called just before every frame is sent to the LEDs: blends colour towards the warm-white LED.
   void handleOverlayDraw() override {
     if (!enabled || !started || mixPct <= 0) return;
-    const int m = mixPct;
+    // WLED applies gamma correction after this point, so a channel at half value only gives off ~22% of its light.
+    // To keep the total light output constant across the knob's range, colour and white are mixed in "light" terms
+    // (colour share = 1 - t, white share = t) and then converted back to channel values with 1/gamma.
+    const float t = mixPct / 100.0f;
+    const float gam = (gammaCorrectCol && gammaCorrectVal > 0.5f) ? gammaCorrectVal : 1.0f;
+    const float inv = 1.0f / gam;
+    const float colorFactor = powf(1.0f - t, inv);                                     // 1.0 -> 0.0
+    const float whiteFactor = powf(t * constrain(whiteLevel, 10, 200) / 100.0f, inv);  // 0.0 -> white strength
     const unsigned total = strip.getLengthTotal();
     for (unsigned i = 0; i < total; i++) {
       uint32_t c = strip.getPixelColor(i);
       if (!c) continue;
       int r = R(c), g = G(c), b = B(c), w = W(c);
       int v = max(r, max(g, b));                      // how bright the colour part is
-      int keep = 100 - m;
-      r = (r * keep) / 100;
-      g = (g * keep) / 100;
-      b = (b * keep) / 100;
-      w = min(255, w + (v * m) / 100);
+      r = (int)(r * colorFactor + 0.5f);
+      g = (int)(g * colorFactor + 0.5f);
+      b = (int)(b * colorFactor + 0.5f);
+      w = min(255, w + (int)(v * whiteFactor + 0.5f));
       strip.setPixelColor(i, RGBW32(r, g, b, w));
     }
   }
@@ -471,6 +479,7 @@ class DigEncodersUsermod : public Usermod {
     top["brightnessStep"] = briStep;
     top["whiteMixStepPercent"] = mixStep;
     top["rearBrightnessPercent"] = rearPercent;
+    top["whiteLevelPercent"] = whiteLevel;
     top["longPressMs"] = longPressMs;
     top["doubleClickMs"] = doubleClickMs;
     top["rebuildSegmentsAtBoot"] = forceSegments;
@@ -501,6 +510,7 @@ class DigEncodersUsermod : public Usermod {
     briStep        = top["brightnessStep"] | briStep;
     mixStep        = top["whiteMixStepPercent"] | mixStep;
     rearPercent    = top["rearBrightnessPercent"] | rearPercent;
+    whiteLevel     = top["whiteLevelPercent"] | whiteLevel;
     longPressMs    = top["longPressMs"] | longPressMs;
     doubleClickMs  = top["doubleClickMs"] | doubleClickMs;
     forceSegments  = top["rebuildSegmentsAtBoot"] | forceSegments;
