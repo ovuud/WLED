@@ -1,10 +1,11 @@
 // Dig-Uno two-encoder usermod for WLED (written for WLED 16.0.x)
 //
 // Two rotary encoders with push buttons, read through an Adafruit MCP23017 port expander (I2C).
-//   Encoder 1 -> front segment (segment 0): turn = brightness, short push = next favorite effect,
-//                double click = next favorite palette, long push = on/off
-//   Encoder 2 -> rear segment (segment 1): turn = brightness, short push = follow/static,
-//                long push = on/off
+//   Encoder 1 -> front segment (segment 0): turn = brightness (rear follows), short push = next favorite effect,
+//                double click = next solid colour, long push = front on/off
+//   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
+//                short push = rear brightness steps 0% / 25% / 50% / 100% of the front, long push = rear on/off
+//   The rear segment (segment 1) always copies the front's effect, speed, intensity and colour.
 //
 // Adafruit MCP23017 breakout wiring (port A, labelled A0..A7 on the board):
 //   enc1 A pin -> A0, B pin -> A1, switch -> A2;  enc2 A pin -> A3, B pin -> A4, switch -> A5.
@@ -116,26 +117,27 @@ class DigEncodersUsermod : public Usermod {
   int    stepsPerClick  = 4;    // 4 for most encoders; use 2 for 30-detent/15-pulse versions
   bool   invertEnc1     = false;
   bool   invertEnc2     = false;
-  int    briStep        = 8;
+  int    briStep        = 8;    // brightness change per click (encoder 1)
+  int    mixStep        = 5;    // white-mix change per click, in percent (encoder 2)
+  int    rearPercent    = 50;   // rear brightness as a percentage of the front brightness (0/25/50/100, remembered)
   int    longPressMs    = 800;
   int    doubleClickMs  = 350;
-  int    staticShift    = 0;    // rear "static" look: palette shift (0-255)
-  int    staticSize     = 128;  // rear "static" look: palette size (0-255)
   bool   forceSegments  = true; // rebuild the two segments at every boot (needs the 2D matrix set up)
-  String favEffects     = "Colorloop,Rainbow,Palette,Aurora,Fire 2012,Plasma,Noise2D,Soap,Lissajous,Matrix,Game Of Life,Waving Cell,Plasma Ball,Distortion Waves,Blobs,Drift,Drift Rose,Julia,Squared Swirl,Fire Noise,Ghost Rider,Hiphotic,Polar Lights,Sun Radiation,Washing Machine";
+  String favEffects     = "Colorloop,Rainbow,Palette,Aurora,Fire 2012,Plasma,Noise2D,Soap,Lissajous,Matrix,Game Of Life,Waving Cell,Plasma Ball,Distortion Waves,Blobs,Drift,Drift Rose,Julia,Squared Swirl,Ghost Rider,Hiphotic,Polar Lights,Sun Radiation,Washing Machine";
   String favPalettes    = "6,7,8,9,10,11,12,13,14,22,35,36,44,45,46,50";
+  String favColors      = "FF0000,FF4000,FF9000,FFE000,40FF00,00FF60,00FFFF,0060FF,0000FF,8000FF,FF00FF,FF0060";
 
   // ---- remembered state (saved automatically a few seconds after any change) ----
-  bool sFrontOn = true, sRearOn = true, sFollow = true;
-  int  sFrontBri = 200, sRearBri = 200, sMode = -1, sPal = 6;
+  bool sFrontOn = true, sRearOn = true;
+  int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1;
 
   // ---- runtime ----
   bool     started = false, wireStarted = false, mcpOk = false, favDirty = true, dirty = false;
-  bool     follow = true;
+  int      mixPct = 0;            // 0..100, used by handleOverlayDraw()
   uint32_t lastTick = 0, lastInitTry = 0, lastChange = 0, lastCheck = 0, snapshot = 0;
-  uint8_t  staticFx = 0;          // effect number of "Palette" (used for the rear static look)
   std::vector<uint8_t> fxIds;
   std::vector<uint8_t> palIds;
+  std::vector<uint32_t> colIds;
   String   missingNames;
 
   Segment &frontSeg() { return strip.getSegment(0); }
@@ -164,11 +166,12 @@ class DigEncodersUsermod : public Usermod {
     sendJson(String("{\"seg\":[{\"id\":") + String((int)id) + "," + fields + "}]}");
   }
 
+  int rearBriFor(int frontBri) {
+    return constrain((frontBri * constrain(rearPercent, 0, 100)) / 100, 0, 255);
+  }
+
   void resolveFavorites() {
-    fxIds.clear(); palIds.clear(); missingNames = ""; staticFx = 0;
-    for (uint8_t i = 0; i < strip.getModeCount(); i++) {
-      if (modeName(i).equalsIgnoreCase("Palette")) { staticFx = i; break; }
-    }
+    fxIds.clear(); palIds.clear(); missingNames = "";
     // effects, by name
     int from = 0;
     String list = favEffects + ",";
@@ -202,6 +205,21 @@ class DigEncodersUsermod : public Usermod {
       if (n >= 0 && n < 255) palIds.push_back((uint8_t)n);
     }
     if (palIds.empty()) palIds.push_back(6);
+    // solid colours, as 6-digit hex (RRGGBB)
+    colIds.clear();
+    from = 0;
+    list = favColors + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String tok = list.substring(from, to);
+      from = to + 1;
+      tok.trim();
+      if (tok.startsWith("#")) tok = tok.substring(1);
+      if (tok.length() != 6) continue;
+      colIds.push_back((uint32_t)strtoul(tok.c_str(), nullptr, 16));
+    }
+    if (colIds.empty()) colIds.push_back(0xFF0000);
     favDirty = false;
   }
 
@@ -225,58 +243,58 @@ class DigEncodersUsermod : public Usermod {
   void captureState() {
     Segment &f = frontSeg();
     sFrontOn = f.on; sFrontBri = f.opacity; sMode = f.mode; sPal = f.palette;
-    if (haveRear()) { Segment &r = rearSeg(); sRearOn = r.on; sRearBri = r.opacity; }
-    sFollow = follow;
+    if (haveRear()) { Segment &r = rearSeg(); sRearOn = r.on; }
+    sMix = mixPct;
   }
 
   uint32_t makeSnapshot() {
     Segment &f = frontSeg();
     uint32_t h = 17;
     h = h * 31 + f.on; h = h * 31 + f.opacity; h = h * 31 + f.mode; h = h * 31 + f.palette;
-    if (haveRear()) { Segment &r = rearSeg(); h = h * 31 + r.on; h = h * 31 + r.opacity; }
-    h = h * 31 + (follow ? 1 : 0);
+    if (haveRear()) { Segment &r = rearSeg(); h = h * 31 + r.on; }
+    h = h * 31 + (uint32_t)mixPct;
+    h = h * 31 + (uint32_t)(sColor + 1);
+    h = h * 31 + (uint32_t)rearPercent;
     return h;
   }
 
-  String staticFields() {
-    return String("\"fx\":") + String((int)staticFx) + ",\"sx\":" + String(constrain(staticShift, 0, 255)) +
-           ",\"ix\":" + String(constrain(staticSize, 0, 255)) + ",\"o1\":false,\"o2\":false,\"o3\":false";
-  }
-
-  // put the rear segment into the look that matches the current follow/static mode
-  void applyRearMode() {
-    if (!haveRear()) return;
-    if (follow) {
-      Segment &f = frontSeg();
-      segCmd(1, String("\"fx\":") + String((int)f.mode) + ",\"sx\":" + String((int)f.speed) + ",\"ix\":" + String((int)f.intensity));
-    } else {
-      segCmd(1, staticFields());
-    }
+  // ,"col":[[r,g,b,0]] for the remembered solid colour (empty if none chosen yet)
+  String colJson() {
+    if (sColor < 0 || sColor >= (int)colIds.size()) return "";
+    uint32_t c = colIds[sColor];
+    return String(",\"col\":[[") + String((int)((c >> 16) & 255)) + "," + String((int)((c >> 8) & 255)) + "," + String((int)(c & 255)) + ",0]]";
   }
 
   void startup() {
     if (favDirty) resolveFavorites();
-    follow = sFollow;
+    mixPct = constrain(sMix, 0, 100);
+    if (sColor < 0 || sColor >= (int)colIds.size()) sColor = 0;
+    sPal = 2;                                          // palette "Color 1": every effect uses the chosen solid colour
     uint8_t m = (sMode >= 0 && sMode < (int)strip.getModeCount()) ? (uint8_t)sMode : fxIds[0];
+    int fb = constrain(sFrontBri, 2, 255);
     bool geometry = forceSegments && strip.isMatrix;
     // front = 5 wide x 10 tall (left part), rear = 2 wide x 19 tall (right part) of the 7 x 19 map
     String j = "{\"on\":true,\"bri\":255,\"seg\":[{\"id\":0,";
     if (geometry) j += "\"start\":0,\"stop\":5,\"startY\":0,\"stopY\":10,";
-    j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(constrain(sFrontBri, 2, 255)) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + "},{\"id\":1,";
+    j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(fb) +
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJson() + "},{\"id\":1,";
     if (geometry) j += "\"start\":5,\"stop\":7,\"startY\":0,\"stopY\":19,";
-    j += String("\"on\":") + (sRearOn ? "true" : "false") + ",\"bri\":" + String(constrain(sRearBri, 2, 255)) +
-         ",\"pal\":" + String(sPal) + "}]}";
+    j += String("\"on\":") + (sRearOn ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJson() + "}]}";
     sendJson(j);
-    applyRearMode();
     snapshot = makeSnapshot();
   }
 
-  void changeBrightness(uint8_t id, int clicks) {
-    Segment &s = strip.getSegment(id);
+  void changeFrontBrightness(int clicks) {
+    Segment &s = frontSeg();
     if (!s.on) return;
     int b = constrain((int)s.opacity + clicks * briStep, 2, 255);
-    segCmd(id, String("\"bri\":") + String(b));
+    segCmd(0, String("\"bri\":") + String(b));
+  }
+
+  void changeMix(int clicks) {
+    mixPct = constrain(mixPct + clicks * constrain(mixStep, 1, 50), 0, 100);
+    lastChange = millis();
   }
 
   void toggleOn(uint8_t id) {
@@ -308,28 +326,42 @@ class DigEncodersUsermod : public Usermod {
     sendJson(j);
   }
 
-  void toggleFollow() {
-    follow = !follow;
-    applyRearMode();
+  // quick colour change: next solid colour on front and rear; palette set to "Color 1" (id 2)
+  void stepRear() {
+    static const int lv[4] = {0, 25, 50, 100};
+    int next = 0;
+    for (int i = 0; i < 4; i++) if (lv[i] > rearPercent) { next = lv[i]; break; }
+    rearPercent = next;
     lastChange = millis();
-    dirty = true;
   }
 
-  // runs about 60 times per second: keeps the rear in step with the front
+  void nextColor() {
+    if (colIds.empty()) return;
+    sColor = (sColor + 1) % (int)colIds.size();
+    String c = colJson() + ",\"pal\":2";
+    String j = "{\"seg\":[{\"id\":0" + c + "}";
+    if (haveRear()) j += ",{\"id\":1" + c + "}";
+    j += "]}";
+    sendJson(j);
+  }
+
+  // runs about 60 times per second: the rear always copies the front
   void syncRear() {
     if (!haveRear()) return;
     Segment &f = frontSeg();
     Segment &r = rearSeg();
     String fields;
     auto add = [&](const String &s) { if (fields.length()) fields += ","; fields += s; };
-    if (r.palette != f.palette) add(String("\"pal\":") + String((int)f.palette));   // shared palette, both modes
-    if (follow) {
-      if (r.mode != f.mode) add(String("\"fx\":") + String((int)f.mode));
-      if (r.speed != f.speed) add(String("\"sx\":") + String((int)f.speed));
-      if (r.intensity != f.intensity) add(String("\"ix\":") + String((int)f.intensity));
-    } else {
-      if (r.mode != staticFx) add(staticFields());                                    // keep the steady look
+    if (r.colors[0] != f.colors[0]) {
+      uint32_t c = f.colors[0];
+      add(String("\"col\":[[") + String((int)((c >> 16) & 255)) + "," + String((int)((c >> 8) & 255)) + "," + String((int)(c & 255)) + ",0]]");
     }
+    if (r.palette != f.palette) add(String("\"pal\":") + String((int)f.palette));
+    if (r.mode != f.mode) add(String("\"fx\":") + String((int)f.mode));
+    if (r.speed != f.speed) add(String("\"sx\":") + String((int)f.speed));
+    if (r.intensity != f.intensity) add(String("\"ix\":") + String((int)f.intensity));
+    int target = rearBriFor((int)f.opacity);
+    if ((int)r.opacity != target) add(String("\"bri\":") + String(target));
     if (fields.length()) segCmd(1, fields);
   }
 
@@ -353,26 +385,24 @@ class DigEncodersUsermod : public Usermod {
     lastTick = now;
     if (favDirty) resolveFavorites();
 
-    // ---- encoder 1: front ----
+    // ---- encoder 1: front brightness / effect / palette / on-off ----
     int16_t d0 = g_delta[0];
-    if (d0) { g_delta[0] = g_delta[0] - d0; changeBrightness(0, d0); }
+    if (d0) { g_delta[0] = g_delta[0] - d0; changeFrontBrightness(d0); }
     uint8_t e0 = g_event[0];
     if (e0) {
       g_event[0] = 0;
       if (e0 == 1) nextEffect();
-      else if (e0 == 2) nextPalette();
+      else if (e0 == 2) nextColor();
       else if (e0 == 3) toggleOn(0);
     }
-    // ---- encoder 2: rear ----
-    if (haveRear()) {
-      int16_t d1 = g_delta[1];
-      if (d1) { g_delta[1] = g_delta[1] - d1; changeBrightness(1, d1); }
-      uint8_t e1 = g_event[1];
-      if (e1) {
-        g_event[1] = 0;
-        if (e1 == 1) toggleFollow();
-        else if (e1 == 3) toggleOn(1);
-      }
+    // ---- encoder 2: white mix / quick palette change / rear on-off ----
+    int16_t d1 = g_delta[1];
+    if (d1) { g_delta[1] = g_delta[1] - d1; changeMix(d1); }
+    uint8_t e1 = g_event[1];
+    if (e1) {
+      g_event[1] = 0;
+      if (e1 == 1) stepRear();
+      else if (e1 == 3 && haveRear()) toggleOn(1);
     }
 
     syncRear();
@@ -390,6 +420,25 @@ class DigEncodersUsermod : public Usermod {
     }
   }
 
+  // Called just before every frame is sent to the LEDs: blends colour towards the warm-white LED.
+  void handleOverlayDraw() override {
+    if (!enabled || !started || mixPct <= 0) return;
+    const int m = mixPct;
+    const unsigned total = strip.getLengthTotal();
+    for (unsigned i = 0; i < total; i++) {
+      uint32_t c = strip.getPixelColor(i);
+      if (!c) continue;
+      int r = R(c), g = G(c), b = B(c), w = W(c);
+      int v = max(r, max(g, b));                      // how bright the colour part is
+      int keep = 100 - m;
+      r = (r * keep) / 100;
+      g = (g * keep) / 100;
+      b = (b * keep) / 100;
+      w = min(255, w + (v * m) / 100);
+      strip.setPixelColor(i, RGBW32(r, g, b, w));
+    }
+  }
+
   void addToJsonInfo(JsonObject &root) override {
     JsonObject user = root["u"];
     if (user.isNull()) user = root.createNestedObject("u");
@@ -397,6 +446,8 @@ class DigEncodersUsermod : public Usermod {
     a.add(mcpOk ? "MCP23017 found" : "MCP23017 NOT found");
     JsonArray b = user.createNestedArray("Favorite effects");
     b.add((int)fxIds.size());
+    JsonArray m = user.createNestedArray("White mix %");
+    m.add(mixPct);
     if (missingNames.length()) {
       JsonArray c = user.createNestedArray("Effect names not found");
       c.add(missingNames);
@@ -418,20 +469,21 @@ class DigEncodersUsermod : public Usermod {
     top["reverseEncoder1"] = invertEnc1;
     top["reverseEncoder2"] = invertEnc2;
     top["brightnessStep"] = briStep;
+    top["whiteMixStepPercent"] = mixStep;
+    top["rearBrightnessPercent"] = rearPercent;
     top["longPressMs"] = longPressMs;
     top["doubleClickMs"] = doubleClickMs;
-    top["staticPaletteShift"] = staticShift;
-    top["staticPaletteSize"] = staticSize;
     top["rebuildSegmentsAtBoot"] = forceSegments;
     top["favoriteEffects"] = favEffects;
     top["favoritePalettes"] = favPalettes;
+    top["favoriteColors"] = favColors;
+    top["savedColorIndex"] = sColor;
     top["savedFrontOn"] = sFrontOn;
     top["savedFrontBrightness"] = sFrontBri;
     top["savedRearOn"] = sRearOn;
-    top["savedRearBrightness"] = sRearBri;
     top["savedEffect"] = sMode;
     top["savedPalette"] = sPal;
-    top["savedFollowMode"] = sFollow;
+    top["savedWhiteMixPercent"] = sMix;
   }
 
   bool readFromConfig(JsonObject &root) override {
@@ -447,27 +499,29 @@ class DigEncodersUsermod : public Usermod {
     invertEnc1     = top["reverseEncoder1"] | invertEnc1;
     invertEnc2     = top["reverseEncoder2"] | invertEnc2;
     briStep        = top["brightnessStep"] | briStep;
+    mixStep        = top["whiteMixStepPercent"] | mixStep;
+    rearPercent    = top["rearBrightnessPercent"] | rearPercent;
     longPressMs    = top["longPressMs"] | longPressMs;
     doubleClickMs  = top["doubleClickMs"] | doubleClickMs;
-    staticShift    = top["staticPaletteShift"] | staticShift;
-    staticSize     = top["staticPaletteSize"] | staticSize;
     forceSegments  = top["rebuildSegmentsAtBoot"] | forceSegments;
     const char *fe = top["favoriteEffects"] | "";
     if (fe[0]) favEffects = fe;
     const char *fp = top["favoritePalettes"] | "";
     if (fp[0]) favPalettes = fp;
+    const char *fc = top["favoriteColors"] | "";
+    if (fc[0]) favColors = fc;
     if (!started) {                                   // saved state is only applied at boot
       sFrontOn  = top["savedFrontOn"] | sFrontOn;
       sFrontBri = top["savedFrontBrightness"] | sFrontBri;
       sRearOn   = top["savedRearOn"] | sRearOn;
-      sRearBri  = top["savedRearBrightness"] | sRearBri;
       sMode     = top["savedEffect"] | sMode;
       sPal      = top["savedPalette"] | sPal;
-      sFollow   = top["savedFollowMode"] | sFollow;
+      sMix      = top["savedWhiteMixPercent"] | sMix;
+      sColor    = top["savedColorIndex"] | sColor;
     }
     favDirty = true;
     pushSettingsToTask();
-    return !top["favoritePalettes"].isNull();
+    return !top["savedWhiteMixPercent"].isNull();     // false the first time, so WLED writes the new settings
   }
 };
 
