@@ -384,7 +384,7 @@ class DigEncodersUsermod : public Usermod {
       if (s != snapshot) { snapshot = s; dirty = true; lastChange = now; }
       if (dirty && now - lastChange > 5000) {
         captureState();
-        serializeConfig();                             // writes cfg.json, which includes this usermod's saved state
+        configNeedsWrite = true;                       // asks WLED to save its settings (includes this usermod's saved state)
         dirty = false;
       }
     }
