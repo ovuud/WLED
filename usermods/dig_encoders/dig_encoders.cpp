@@ -6,6 +6,8 @@
 //                push and turn = move the colour around the hue wheel in 3 degree steps
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
 //                short push = rear brightness steps 0% / 25% / 50% / 100% of the front, long push = rear on/off
+//   Some effects use a second colour that is a fixed number of degrees further round the colour wheel than the
+//   chosen colour (setting effectHueShift, default Wipe=15). Fixed colour pairs are also possible (effectColors).
 //   The rear segment (segment 1) always copies the front's effect, speed, intensity and colour.
 //
 // Adafruit MCP23017 breakout wiring (port A, labelled A0..A7 on the board):
@@ -133,8 +135,10 @@ class DigEncodersUsermod : public Usermod {
   int    longPressMs    = 800;
   int    doubleClickMs  = 350;
   bool   forceSegments  = true; // rebuild the two segments at every boot (needs the 2D matrix set up)
-  String favEffects     = "Colorloop,Rainbow,Palette,Aurora,Fire 2012,Plasma,Noise2D,Soap,Lissajous,Matrix,Game Of Life,Waving Cell,Plasma Ball,Distortion Waves,Blobs,Drift,Drift Rose,Julia,Squared Swirl,Ghost Rider,Hiphotic,Polar Lights,Sun Radiation,Washing Machine";
+  String favEffects     = "Wipe,Colorloop,Rainbow,Palette,Aurora,Fire 2012,Plasma,Noise2D,Soap,Lissajous,Matrix,Game Of Life,Waving Cell,Plasma Ball,Distortion Waves,Blobs,Drift,Drift Rose,Julia,Squared Swirl,Ghost Rider,Hiphotic,Polar Lights,Sun Radiation,Washing Machine";
   String favPalettes    = "6,7,8,9,10,11,12,13,14,22,35,36,44,45,46,50";
+  String effectColors   = "";                      // optional fixed pairs: Name=RRGGBB+RRGGBB, separate entries with commas
+  String effectHueShift = "Wipe=15";               // Name=degrees: colour 2 = the chosen colour turned this many degrees clockwise on the wheel
   String favColors      = "FF0000,FF4000,FF9000,FFE000,40FF00,00FF60,00FFFF,0060FF,0000FF,8000FF,FF00FF,FF0060";
 
   // ---- remembered state (saved automatically a few seconds after any change) ----
@@ -148,6 +152,10 @@ class DigEncodersUsermod : public Usermod {
   std::vector<uint8_t> fxIds;
   std::vector<uint8_t> palIds;
   std::vector<uint32_t> colIds;
+  struct FxPair { uint8_t fx; uint32_t c1, c2; };
+  std::vector<FxPair> fxPairs;
+  struct FxShift { uint8_t fx; int deg; };
+  std::vector<FxShift> fxShifts;
   String   missingNames;
 
   Segment &frontSeg() { return strip.getSegment(0); }
@@ -230,6 +238,48 @@ class DigEncodersUsermod : public Usermod {
       colIds.push_back((uint32_t)strtoul(tok.c_str(), nullptr, 16));
     }
     if (colIds.empty()) colIds.push_back(0xFF0000);
+    // effects with their own colour pair, written as  Name=RRGGBB+RRGGBB
+    fxPairs.clear();
+    from = 0;
+    list = effectColors + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String tok = list.substring(from, to);
+      from = to + 1;
+      int eq = tok.indexOf('=');
+      int plus = tok.indexOf('+');
+      if (eq < 1 || plus < eq) continue;
+      String name = tok.substring(0, eq); name.trim();
+      String a = tok.substring(eq + 1, plus); a.trim();
+      String b = tok.substring(plus + 1); b.trim();
+      if (a.startsWith("#")) a = a.substring(1);
+      if (b.startsWith("#")) b = b.substring(1);
+      if (a.length() != 6 || b.length() != 6) continue;
+      for (uint8_t i = 0; i < strip.getModeCount(); i++) {
+        if (name.equalsIgnoreCase(modeName(i))) {
+          fxPairs.push_back({i, (uint32_t)strtoul(a.c_str(), nullptr, 16), (uint32_t)strtoul(b.c_str(), nullptr, 16)});
+          break;
+        }
+      }
+    }
+    // effects whose second colour is the chosen colour turned by some degrees, written as  Name=degrees
+    fxShifts.clear();
+    from = 0;
+    list = effectHueShift + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String tok = list.substring(from, to);
+      from = to + 1;
+      int eq = tok.indexOf('=');
+      if (eq < 1) continue;
+      String name = tok.substring(0, eq); name.trim();
+      int deg = tok.substring(eq + 1).toInt();
+      for (uint8_t i = 0; i < strip.getModeCount(); i++) {
+        if (name.equalsIgnoreCase(modeName(i))) { fxShifts.push_back({i, deg}); break; }
+      }
+    }
     favDirty = false;
   }
 
@@ -303,11 +353,41 @@ class DigEncodersUsermod : public Usermod {
       sHue = rgbToHue(base);
     }
     sHue = (((sHue + clicks * 3) % 360) + 360) % 360;
-    String c = colJson() + ",\"pal\":2";
+    String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     if (haveRear()) j += ",{\"id\":1" + c + "}";
     j += "]}";
     sendJson(j);
+  }
+
+  static String rgbArr(uint32_t c) {
+    return String("[") + String((int)((c >> 16) & 255)) + "," + String((int)((c >> 8) & 255)) + "," + String((int)(c & 255)) + ",0]";
+  }
+
+  bool pairFor(uint8_t fx, uint32_t &c1, uint32_t &c2) {
+    for (auto &p : fxPairs) if (p.fx == fx) { c1 = p.c1; c2 = p.c2; return true; }
+    return false;
+  }
+
+  // the remembered solid colour (what a double click / push-and-turn last chose)
+  uint32_t solidColor() {
+    if (sHue >= 0) return hueToRgb(sHue);
+    if (sColor >= 0 && sColor < (int)colIds.size()) return colIds[sColor];
+    return 0xFF0000;
+  }
+
+  // ,"col":[...] for effect fx: its own pair if it has one, otherwise the solid colour with colour 2 black
+  String colJsonFor(uint8_t fx) {
+    uint32_t c1, c2;
+    bool shifted = false;
+    for (auto &p : fxShifts) if (p.fx == fx) {
+      c1 = solidColor();
+      c2 = hueToRgb(rgbToHue(c1) + p.deg);              // fully saturated colour on the outer rim of the wheel
+      shifted = true;
+      break;
+    }
+    if (!shifted && !pairFor(fx, c1, c2)) { c1 = solidColor(); c2 = 0; }
+    return String(",\"col\":[") + rgbArr(c1) + "," + rgbArr(c2) + "]";
   }
 
   // ,"col":[[r,g,b,0]] for the remembered solid colour (empty if none chosen yet)
@@ -331,10 +411,10 @@ class DigEncodersUsermod : public Usermod {
     String j = "{\"on\":true,\"bri\":255,\"seg\":[{\"id\":0,";
     if (geometry) j += "\"start\":0,\"stop\":5,\"startY\":0,\"stopY\":10,";
     j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(fb) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJson() + "},{\"id\":1,";
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "},{\"id\":1,";
     if (geometry) j += "\"start\":5,\"stop\":7,\"startY\":0,\"stopY\":19,";
     j += String("\"on\":") + (sRearOn ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJson() + "}]}";
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "}]}";
     sendJson(j);
     snapshot = makeSnapshot();
   }
@@ -363,7 +443,12 @@ class DigEncodersUsermod : public Usermod {
     bool found = false;
     for (size_t i = 0; i < fxIds.size(); i++) if (fxIds[i] == f.mode) { idx = i; found = true; break; }
     size_t next = found ? (idx + 1) % fxIds.size() : 0;
-    segCmd(0, String("\"fx\":") + String((int)fxIds[next]));
+    uint8_t fx = fxIds[next];
+    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":2" + colJsonFor(fx);
+    String j = "{\"seg\":[{\"id\":0," + c + "}";
+    if (haveRear()) j += ",{\"id\":1," + c + "}";
+    j += "]}";
+    sendJson(j);
   }
 
   void nextPalette() {
@@ -393,7 +478,7 @@ class DigEncodersUsermod : public Usermod {
     if (colIds.empty()) return;
     sColor = (sColor + 1) % (int)colIds.size();
     sHue = -1;                                          // back to the colour list
-    String c = colJson() + ",\"pal\":2";
+    String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     if (haveRear()) j += ",{\"id\":1" + c + "}";
     j += "]}";
@@ -407,9 +492,9 @@ class DigEncodersUsermod : public Usermod {
     Segment &r = rearSeg();
     String fields;
     auto add = [&](const String &s) { if (fields.length()) fields += ","; fields += s; };
-    if (r.colors[0] != f.colors[0]) {
-      uint32_t c = f.colors[0];
-      add(String("\"col\":[[") + String((int)((c >> 16) & 255)) + "," + String((int)((c >> 8) & 255)) + "," + String((int)(c & 255)) + ",0]]");
+    bool d0 = r.colors[0] != f.colors[0], d1 = r.colors[1] != f.colors[1];
+    if (d0 || d1) {                                    // one "col" entry; an empty [] leaves that colour unchanged
+      add(String("\"col\":[") + (d0 ? rgbArr(f.colors[0]) : String("[]")) + "," + (d1 ? rgbArr(f.colors[1]) : String("[]")) + "]");
     }
     if (r.palette != f.palette) add(String("\"pal\":") + String((int)f.palette));
     if (r.mode != f.mode) add(String("\"fx\":") + String((int)f.mode));
@@ -542,6 +627,8 @@ class DigEncodersUsermod : public Usermod {
     top["favoriteEffects"] = favEffects;
     top["favoritePalettes"] = favPalettes;
     top["favoriteColors"] = favColors;
+    top["effectColors"] = effectColors;
+    top["effectHueShift"] = effectHueShift;
     top["savedColorIndex"] = sColor;
     top["savedHue"] = sHue;
     top["savedFrontOn"] = sFrontOn;
@@ -577,6 +664,10 @@ class DigEncodersUsermod : public Usermod {
     if (fp[0]) favPalettes = fp;
     const char *fc = top["favoriteColors"] | "";
     if (fc[0]) favColors = fc;
+    const char *ec = top["effectColors"] | "";
+    if (ec[0]) effectColors = ec;
+    const char *eh = top["effectHueShift"] | "";
+    if (eh[0]) effectHueShift = eh;
     if (!started) {                                   // saved state is only applied at boot
       sFrontOn  = top["savedFrontOn"] | sFrontOn;
       sFrontBri = top["savedFrontBrightness"] | sFrontBri;
