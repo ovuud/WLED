@@ -2,7 +2,8 @@
 //
 // Two rotary encoders with push buttons, read through an Adafruit MCP23017 port expander (I2C).
 //   Encoder 1 -> front segment (segment 0): turn = brightness (rear follows), short push = next favorite effect,
-//                double click = next solid colour, long push = front on/off
+//                double click = next solid colour, long push = front on/off,
+//                push and turn = move the colour around the hue wheel in 3 degree steps
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
 //                short push = rear brightness steps 0% / 25% / 50% / 100% of the front, long push = rear on/off
 //   The rear segment (segment 1) always copies the front's effect, speed, intensity and colour.
@@ -23,6 +24,7 @@
 // Fast background reader (runs in its own task so quick knob turns are not missed)
 // ---------------------------------------------------------------------------------------------
 static volatile int16_t  g_delta[2]  = {0, 0};      // clicks turned since last read (+ / -)
+static volatile int16_t  g_hue       = 0;           // clicks turned on encoder 1 while its button was held down
 static volatile uint8_t  g_event[2]  = {0, 0};      // 1 = short push, 2 = double click, 3 = long push
 static volatile uint8_t  g_addr      = 0x20;
 static volatile uint8_t  g_steps     = 4;           // quadrature transitions per click
@@ -53,6 +55,7 @@ struct Btn {
   uint32_t tRaw   = 0;
   uint8_t  st     = 0;       // 0 idle, 1 down, 2 waiting for 2nd click, 3 2nd click held, 4 long held
   uint32_t t      = 0;
+  bool     turned = false;   // knob was turned while the button was held (so the push is not a click)
 };
 
 static void btnUpdate(Btn &b, uint8_t idx, bool pressed, uint32_t now, bool useDouble) {
@@ -64,13 +67,14 @@ static void btnUpdate(Btn &b, uint8_t idx, bool pressed, uint32_t now, bool useD
       if (b.st == 2) { g_event[idx] = 2; b.st = 3; }  // second click inside the window
       else           { b.st = 1; b.t = now; }
     } else {                                          // released
-      if (b.st == 1) {
+      if (b.turned) { b.turned = false; b.st = 0; }     // push-and-turn: no click event on release
+      else if (b.st == 1) {
         if (useDouble) { b.st = 2; b.t = now; }       // wait to see if a second click follows
         else           { g_event[idx] = 1; b.st = 0; }
       } else b.st = 0;
     }
   } else {
-    if (b.st == 1 && b.stable && (now - b.t) >= g_longMs) { g_event[idx] = 3; b.st = 4; }
+    if (b.st == 1 && b.stable && !b.turned && (now - b.t) >= g_longMs) { g_event[idx] = 3; b.st = 4; }
     else if (b.st == 2 && (now - b.t) >= g_dblMs)          { g_event[idx] = 1; b.st = 0; }
   }
 }
@@ -92,8 +96,13 @@ static void encTask(void *) {
         prev[i] = cur;
         if (g_invert[i]) d = -d;
         acc[i] += d;
-        if (acc[i] >= (int8_t)g_steps)       { g_delta[i] = g_delta[i] + 1; acc[i] = 0; }
-        else if (acc[i] <= -(int8_t)g_steps) { g_delta[i] = g_delta[i] - 1; acc[i] = 0; }
+        int8_t click = 0;
+        if (acc[i] >= (int8_t)g_steps)       { click = 1;  acc[i] = 0; }
+        else if (acc[i] <= -(int8_t)g_steps) { click = -1; acc[i] = 0; }
+        if (click) {
+          if (i == 0 && btn[0].stable) { g_hue = g_hue + click; btn[0].turned = true; }   // push and turn = hue wheel
+          else g_delta[i] = g_delta[i] + click;
+        }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
         btnUpdate(btn[i], i, pressed, now, i == 0);   // only encoder 1 uses double click
       }
@@ -130,7 +139,7 @@ class DigEncodersUsermod : public Usermod {
 
   // ---- remembered state (saved automatically a few seconds after any change) ----
   bool sFrontOn = true, sRearOn = true;
-  int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1;
+  int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1;   // sHue: 0..359 when the colour came from the hue wheel, else -1
 
   // ---- runtime ----
   bool     started = false, wireStarted = false, mcpOk = false, favDirty = true, dirty = false;
@@ -255,14 +264,58 @@ class DigEncodersUsermod : public Usermod {
     if (haveRear()) { Segment &r = rearSeg(); h = h * 31 + r.on; }
     h = h * 31 + (uint32_t)mixPct;
     h = h * 31 + (uint32_t)(sColor + 1);
+    h = h * 31 + (uint32_t)(sHue + 1);
     h = h * 31 + (uint32_t)rearPercent;
     return h;
   }
 
+  static uint32_t hueToRgb(int h) {
+    h = ((h % 360) + 360) % 360;
+    int f = (h % 60) * 255 / 60;
+    int r, g, b;
+    switch (h / 60) {
+      case 0:  r = 255;     g = f;       b = 0;       break;
+      case 1:  r = 255 - f; g = 255;     b = 0;       break;
+      case 2:  r = 0;       g = 255;     b = f;       break;
+      case 3:  r = 0;       g = 255 - f; b = 255;     break;
+      case 4:  r = f;       g = 0;       b = 255;     break;
+      default: r = 255;     g = 0;       b = 255 - f; break;
+    }
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+  }
+
+  static int rgbToHue(uint32_t c) {
+    int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+    int mx = max(r, max(g, b)), mn = min(r, min(g, b));
+    if (mx == mn) return 0;
+    float d = (float)(mx - mn), h;
+    if (mx == r)      h = fmodf((g - b) / d, 6.0f);
+    else if (mx == g) h = (b - r) / d + 2.0f;
+    else              h = (r - g) / d + 4.0f;
+    int deg = (int)(h * 60.0f + 0.5f);
+    return ((deg % 360) + 360) % 360;
+  }
+
+  // push and turn on encoder 1: move around the hue wheel, 3 degrees per click, front and rear together
+  void changeHue(int clicks) {
+    if (sHue < 0) {
+      uint32_t base = (sColor >= 0 && sColor < (int)colIds.size()) ? colIds[sColor] : 0xFF0000;
+      sHue = rgbToHue(base);
+    }
+    sHue = (((sHue + clicks * 3) % 360) + 360) % 360;
+    String c = colJson() + ",\"pal\":2";
+    String j = "{\"seg\":[{\"id\":0" + c + "}";
+    if (haveRear()) j += ",{\"id\":1" + c + "}";
+    j += "]}";
+    sendJson(j);
+  }
+
   // ,"col":[[r,g,b,0]] for the remembered solid colour (empty if none chosen yet)
   String colJson() {
-    if (sColor < 0 || sColor >= (int)colIds.size()) return "";
-    uint32_t c = colIds[sColor];
+    uint32_t c;
+    if (sHue >= 0) c = hueToRgb(sHue);
+    else if (sColor >= 0 && sColor < (int)colIds.size()) c = colIds[sColor];
+    else return "";
     return String(",\"col\":[[") + String((int)((c >> 16) & 255)) + "," + String((int)((c >> 8) & 255)) + "," + String((int)(c & 255)) + ",0]]";
   }
 
@@ -339,6 +392,7 @@ class DigEncodersUsermod : public Usermod {
   void nextColor() {
     if (colIds.empty()) return;
     sColor = (sColor + 1) % (int)colIds.size();
+    sHue = -1;                                          // back to the colour list
     String c = colJson() + ",\"pal\":2";
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     if (haveRear()) j += ",{\"id\":1" + c + "}";
@@ -387,6 +441,8 @@ class DigEncodersUsermod : public Usermod {
     if (favDirty) resolveFavorites();
 
     // ---- encoder 1: front brightness / effect / palette / on-off ----
+    int16_t h0 = g_hue;
+    if (h0) { g_hue = g_hue - h0; changeHue(h0); }
     int16_t d0 = g_delta[0];
     if (d0) { g_delta[0] = g_delta[0] - d0; changeFrontBrightness(d0); }
     uint8_t e0 = g_event[0];
@@ -487,6 +543,7 @@ class DigEncodersUsermod : public Usermod {
     top["favoritePalettes"] = favPalettes;
     top["favoriteColors"] = favColors;
     top["savedColorIndex"] = sColor;
+    top["savedHue"] = sHue;
     top["savedFrontOn"] = sFrontOn;
     top["savedFrontBrightness"] = sFrontBri;
     top["savedRearOn"] = sRearOn;
@@ -528,6 +585,7 @@ class DigEncodersUsermod : public Usermod {
       sPal      = top["savedPalette"] | sPal;
       sMix      = top["savedWhiteMixPercent"] | sMix;
       sColor    = top["savedColorIndex"] | sColor;
+      sHue      = top["savedHue"] | sHue;
     }
     favDirty = true;
     pushSettingsToTask();
