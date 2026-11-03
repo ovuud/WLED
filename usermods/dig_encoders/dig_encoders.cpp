@@ -163,6 +163,15 @@ class DigEncodersUsermod : public Usermod {
   Segment &frontSeg() { return strip.getSegment(0); }
   Segment &rearSeg() { return strip.getSegment(1); }
   bool haveRear() { return strip.getSegmentsNum() >= 2; }
+  bool haveRear2() { return strip.getSegmentsNum() >= 3; }
+  // the two rear strips are segments 1 (left of the front, LEDs 1-19) and 2 (right of the front, LEDs 20-38)
+  // c starts with a comma:  ,{"id":1<c>},{"id":2<c>}
+  String rearSegs(const String &c) {
+    String j;
+    if (haveRear())  j += String(",{\"id\":1") + c + "}";
+    if (haveRear2()) j += String(",{\"id\":2") + c + "}";
+    return j;
+  }
 
   static String modeName(uint8_t id) {
     String s;
@@ -363,7 +372,7 @@ class DigEncodersUsermod : public Usermod {
     sHue = (((sHue + clicks * 3) % 360) + 360) % 360;
     String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
     String j = "{\"seg\":[{\"id\":0" + c + "}";
-    if (haveRear()) j += ",{\"id\":1" + c + "}";
+    j += rearSegs(c);
     j += "]}";
     sendJson(j);
   }
@@ -416,14 +425,19 @@ class DigEncodersUsermod : public Usermod {
     uint8_t m = (sMode >= 0 && sMode < (int)strip.getModeCount()) ? (uint8_t)sMode : fxIds[0];
     int fb = constrain(sFrontBri, 2, 255);
     bool geometry = forceSegments && strip.isMatrix;
-    // front = 5 wide x 10 tall (left part), rear = 2 wide x 19 tall (right part) of the 7 x 19 map
+    // map is 9 wide x 19 tall: columns 0-1 = rear strip 1 (LED in column 0, column 1 empty), columns 2-6 = front matrix (lit LEDs on every second row,
+    // level with the strip LEDs), columns 7-8 = rear strip 2 (column 7 empty, LED in column 8). A segment needs 2+ columns for WLED to treat it as 2D.
     String j = "{\"on\":true,\"bri\":255,\"seg\":[{\"id\":0,";
-    if (geometry) j += "\"start\":0,\"stop\":5,\"startY\":0,\"stopY\":10,";
+    if (geometry) j += "\"start\":2,\"stop\":7,\"startY\":0,\"stopY\":19,";
     j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(fb) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "},{\"id\":1,";
-    if (geometry) j += "\"start\":5,\"stop\":7,\"startY\":0,\"stopY\":19,";
-    j += String("\"on\":") + ((rearUserOn && rearPercent > 0) ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "}]}";
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "}";
+    String rest = String("\"on\":") + ((rearUserOn && rearPercent > 0) ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m);
+    j += ",{\"id\":1,";
+    if (geometry) j += "\"start\":0,\"stop\":2,\"startY\":0,\"stopY\":19,";
+    j += rest + "},{\"id\":2,";
+    if (geometry) j += "\"start\":7,\"stop\":9,\"startY\":0,\"stopY\":19,";
+    j += rest + "}]}";
     sendJson(j);
     snapshot = makeSnapshot();
   }
@@ -471,7 +485,7 @@ class DigEncodersUsermod : public Usermod {
     uint8_t fx = fxIds[next];
     String c = String("\"fx\":") + String((int)fx) + ",\"pal\":2" + colJsonFor(fx);
     String j = "{\"seg\":[{\"id\":0," + c + "}";
-    if (haveRear()) j += ",{\"id\":1," + c + "}";
+    j += rearSegs(String(",") + c);
     j += "]}";
     sendJson(j);
   }
@@ -485,7 +499,7 @@ class DigEncodersUsermod : public Usermod {
     size_t next = found ? (idx + 1) % palIds.size() : 0;
     String p = String((int)palIds[next]);
     String j = "{\"seg\":[{\"id\":0,\"pal\":" + p + "}";
-    if (haveRear()) j += ",{\"id\":1,\"pal\":" + p + "}";   // palette is always shared
+    j += rearSegs(String(",\"pal\":") + p);   // palette is always shared
     j += "]}";
     sendJson(j);
   }
@@ -497,37 +511,41 @@ class DigEncodersUsermod : public Usermod {
     sHue = -1;                                          // back to the colour list
     String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
     String j = "{\"seg\":[{\"id\":0" + c + "}";
-    if (haveRear()) j += ",{\"id\":1" + c + "}";
+    j += rearSegs(c);
     j += "]}";
     sendJson(j);
   }
 
-  // runs about 60 times per second: the rear always copies the front
+  // runs about 60 times per second: both rear strips always copy the front
   void syncRear() {
     if (!haveRear()) return;
     Segment &f = frontSeg();
-    Segment &r = rearSeg();
-    String fields;
-    auto add = [&](const String &s) { if (fields.length()) fields += ","; fields += s; };
-    bool d0 = r.colors[0] != f.colors[0], d1 = r.colors[1] != f.colors[1];
-    if (d0 || d1) {                                    // one "col" entry; an empty [] leaves that colour unchanged
-      add(String("\"col\":[") + (d0 ? rgbArr(f.colors[0]) : String("[]")) + "," + (d1 ? rgbArr(f.colors[1]) : String("[]")) + "]");
+    String all;
+    for (uint8_t id = 1; id <= (haveRear2() ? 2 : 1); id++) {
+      Segment &r = strip.getSegment(id);
+      String fields;
+      auto add = [&](const String &s) { if (fields.length()) fields += ","; fields += s; };
+      bool d0 = r.colors[0] != f.colors[0], d1 = r.colors[1] != f.colors[1];
+      if (d0 || d1) {                                  // one "col" entry; an empty [] leaves that colour unchanged
+        add(String("\"col\":[") + (d0 ? rgbArr(f.colors[0]) : String("[]")) + "," + (d1 ? rgbArr(f.colors[1]) : String("[]")) + "]");
+      }
+      if (r.palette != f.palette) add(String("\"pal\":") + String((int)f.palette));
+      if (r.mode != f.mode) add(String("\"fx\":") + String((int)f.mode));
+      if (r.speed != f.speed) add(String("\"sx\":") + String((int)f.speed));
+      if (r.intensity != f.intensity) add(String("\"ix\":") + String((int)f.intensity));
+      // WLED switches a segment ON for an instant whenever it receives a brightness, so while the rear is meant to be off
+      // it is never sent one. When it is switched back on, brightness and "on" go out together.
+      bool wantOn = rearUserOn && rearPercent > 0;
+      if (!wantOn) {
+        if (r.on) add("\"on\":false");
+      } else {
+        int target = rearBriFor(frontBriNow());
+        if ((int)r.opacity != target) { add(String("\"bri\":") + String(target)); add("\"on\":true"); }
+        else if (!r.on) add("\"on\":true");
+      }
+      if (fields.length()) { if (all.length()) all += ","; all += String("{\"id\":") + String((int)id) + "," + fields + "}"; }
     }
-    if (r.palette != f.palette) add(String("\"pal\":") + String((int)f.palette));
-    if (r.mode != f.mode) add(String("\"fx\":") + String((int)f.mode));
-    if (r.speed != f.speed) add(String("\"sx\":") + String((int)f.speed));
-    if (r.intensity != f.intensity) add(String("\"ix\":") + String((int)f.intensity));
-    // WLED switches a segment ON for an instant whenever it receives a brightness, so while the rear is meant to be off
-    // it is never sent one. When it is switched back on, brightness and "on" go out together.
-    bool wantOn = rearUserOn && rearPercent > 0;
-    if (!wantOn) {
-      if (r.on) add("\"on\":false");
-    } else {
-      int target = rearBriFor(frontBriNow());
-      if ((int)r.opacity != target) { add(String("\"bri\":") + String(target)); add("\"on\":true"); }
-      else if (!r.on) add("\"on\":true");
-    }
-    if (fields.length()) segCmd(1, fields);
+    if (all.length()) sendJson(String("{\"seg\":[") + all + "]}");
   }
 
  public:
