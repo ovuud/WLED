@@ -2,10 +2,10 @@
 //
 // Two rotary encoders with push buttons, read through an Adafruit MCP23017 port expander (I2C).
 //   Encoder 1 -> front segment (segment 0): turn = brightness (rear follows), short push = next favorite effect,
-//                double click = next solid colour, long push = front on/off,
+//                long push = front on/off,
 //                push and turn = move the colour around the hue wheel in 3 degree steps
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
-//                short push = rear brightness steps 0% / 25% / 50% / 100% of the front, long push = rear on/off
+//                short push = next solid colour, long push = rear on/off
 //   Some effects use a second colour that is a fixed number of degrees further round the colour wheel than the
 //   chosen colour (setting effectHueShift, default Wipe=15). Fixed colour pairs are also possible (effectColors).
 //   The rear segment (segment 1) always copies the front's effect, speed, intensity and colour.
@@ -106,7 +106,7 @@ static void encTask(void *) {
           else g_delta[i] = g_delta[i] + click;
         }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
-        btnUpdate(btn[i], i, pressed, now, i == 0);   // only encoder 1 uses double click
+        btnUpdate(btn[i], i, pressed, now, false);    // no double click any more: a short push acts at once
       }
     }
     vTaskDelay(1);
@@ -131,7 +131,7 @@ class DigEncodersUsermod : public Usermod {
   int    briStep        = 8;    // brightness change per click (encoder 1)
   int    mixStep        = 5;    // white-mix change per click, in percent (encoder 2)
   int    whiteLevel     = 100;  // how strong the white LED is at 100% mix, relative to the colour it replaces (lower if the white looks brighter than the colour)
-  int    rearPercent    = 50;   // rear brightness as a percentage of the front brightness (0/25/50/100, remembered)
+  int    rearPercent    = 70;   // rear brightness as a percentage of the front brightness (editable in the settings)
   int    longPressMs    = 800;
   int    doubleClickMs  = 350;
   bool   forceSegments  = true; // rebuild the two segments at every boot (needs the 2D matrix set up)
@@ -474,14 +474,6 @@ class DigEncodersUsermod : public Usermod {
   }
 
   // quick colour change: next solid colour on front and rear; palette set to "Color 1" (id 2)
-  void stepRear() {
-    static const int lv[4] = {0, 25, 50, 100};
-    int next = 0;
-    for (int i = 0; i < 4; i++) if (lv[i] > rearPercent) { next = lv[i]; break; }
-    rearPercent = next;
-    lastChange = millis();
-  }
-
   void nextColor() {
     if (colIds.empty()) return;
     sColor = (sColor + 1) % (int)colIds.size();
@@ -508,11 +500,16 @@ class DigEncodersUsermod : public Usermod {
     if (r.mode != f.mode) add(String("\"fx\":") + String((int)f.mode));
     if (r.speed != f.speed) add(String("\"sx\":") + String((int)f.speed));
     if (r.intensity != f.intensity) add(String("\"ix\":") + String((int)f.intensity));
-    // brightness and on/off are always sent together, because WLED switches a segment on whenever it receives a brightness
+    // WLED switches a segment ON for an instant whenever it receives a brightness, so while the rear is meant to be off
+    // it is never sent one. When it is switched back on, brightness and "on" go out together.
     bool wantOn = rearUserOn && rearPercent > 0;
-    int target = rearBriFor((int)f.opacity);
-    if ((int)r.opacity != target) { add(String("\"bri\":") + String(target)); add(String("\"on\":") + (wantOn ? "true" : "false")); }
-    else if (r.on != wantOn) add(String("\"on\":") + (wantOn ? "true" : "false"));
+    if (!wantOn) {
+      if (r.on) add("\"on\":false");
+    } else {
+      int target = rearBriFor((int)f.opacity);
+      if ((int)r.opacity != target) { add(String("\"bri\":") + String(target)); add("\"on\":true"); }
+      else if (!r.on) add("\"on\":true");
+    }
     if (fields.length()) segCmd(1, fields);
   }
 
@@ -545,7 +542,6 @@ class DigEncodersUsermod : public Usermod {
     if (e0) {
       g_event[0] = 0;
       if (e0 == 1) nextEffect();
-      else if (e0 == 2) nextColor();
       else if (e0 == 3) toggleOn(0);
     }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
@@ -554,7 +550,7 @@ class DigEncodersUsermod : public Usermod {
     uint8_t e1 = g_event[1];
     if (e1) {
       g_event[1] = 0;
-      if (e1 == 1) stepRear();
+      if (e1 == 1) nextColor();
       else if (e1 == 3 && haveRear()) toggleOn(1);
     }
 
