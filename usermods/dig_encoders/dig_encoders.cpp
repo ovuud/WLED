@@ -27,6 +27,7 @@
 // ---------------------------------------------------------------------------------------------
 static volatile int16_t  g_delta[2]  = {0, 0};      // clicks turned since last read (+ / -)
 static volatile int16_t  g_hue       = 0;           // clicks turned on encoder 1 while its button was held down
+static volatile int16_t  g_speed     = 0;           // clicks turned on encoder 2 while its button was held down
 static volatile uint8_t  g_event[2]  = {0, 0};      // 1 = short push, 2 = double click, 3 = long push
 static volatile uint8_t  g_addr      = 0x20;
 static volatile uint8_t  g_steps     = 4;           // quadrature transitions per click
@@ -103,6 +104,7 @@ static void encTask(void *) {
         else if (acc[i] <= -(int8_t)g_steps) { click = -1; acc[i] = 0; }
         if (click) {
           if (i == 0 && btn[0].stable) { g_hue = g_hue + click; btn[0].turned = true; }   // push and turn = hue wheel
+          else if (i == 1 && btn[1].stable) { g_speed = g_speed + click; btn[1].turned = true; }   // push and turn on encoder 2 = effect speed
           else g_delta[i] = g_delta[i] + click;
         }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
@@ -130,6 +132,7 @@ class DigEncodersUsermod : public Usermod {
   bool   invertEnc2     = false;
   int    briStep        = 8;    // brightness change per click (encoder 1)
   int    mixStep        = 5;    // white-mix change per click, in percent (encoder 2)
+  int    speedStep      = 8;    // effect-speed change per click (encoder 2, push and turn), out of 255
   int    whiteLevel     = 100;  // how strong the white LED is at 100% mix, relative to the colour it replaces (lower if the white looks brighter than the colour)
   int    rearPercent    = 70;   // rear brightness as a percentage of the front brightness (editable in the settings)
   int    longPressMs    = 800;
@@ -143,7 +146,7 @@ class DigEncodersUsermod : public Usermod {
 
   // ---- remembered state (saved automatically a few seconds after any change) ----
   bool sFrontOn = true, sRearOn = true;
-  int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1;   // sHue: 0..359 when the colour came from the hue wheel, else -1
+  int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1, sSpeed = -1;   // sSpeed: effect speed 0..255, -1 = not chosen yet; sHue: 0..359 when the colour came from the hue wheel, else -1
 
   // ---- runtime ----
   int      heldBri = -1;           // front brightness chosen while the front is OFF (-1 = none); applied when the front is switched on
@@ -322,6 +325,7 @@ class DigEncodersUsermod : public Usermod {
     sFrontOn = f.on; sFrontBri = frontBriNow(); sMode = f.mode; sPal = f.palette;
     sRearOn = rearUserOn;
     sMix = mixPct;
+    sSpeed = f.speed;
   }
 
   uint32_t makeSnapshot() {
@@ -332,6 +336,7 @@ class DigEncodersUsermod : public Usermod {
     h = h * 31 + (uint32_t)mixPct;
     h = h * 31 + (uint32_t)(sColor + 1);
     h = h * 31 + (uint32_t)(sHue + 1);
+    h = h * 31 + f.speed;
     h = h * 31 + (uint32_t)rearPercent;
     return h;
   }
@@ -430,12 +435,13 @@ class DigEncodersUsermod : public Usermod {
     //                     strip LEDs), columns 7-8 = rear strip 2 (LED in column 8). A segment needs 2+ columns for WLED to treat it as 2D.
     //   7 wide x 19 tall: columns 0-4 = front (5 wide x 10 tall), columns 5-6 = both rear strips side by side as one segment.
     const bool wide = Segment::maxWidth >= 9;
+    String spd = (sSpeed >= 0) ? String(",\"sx\":") + String(constrain(sSpeed, 0, 255)) : String("");
     String j = "{\"on\":true,\"bri\":255,\"seg\":[{\"id\":0,";
     if (geometry) j += wide ? "\"start\":2,\"stop\":7,\"startY\":0,\"stopY\":19," : "\"start\":0,\"stop\":5,\"startY\":0,\"stopY\":10,";
     j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(fb) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "}";
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + spd + "}";
     String rest = String("\"on\":") + ((rearUserOn && rearPercent > 0) ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m);
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + spd;
     j += ",{\"id\":1,";
     if (geometry) j += wide ? "\"start\":0,\"stop\":2,\"startY\":0,\"stopY\":19," : "\"start\":5,\"stop\":7,\"startY\":0,\"stopY\":19,";
     j += rest + "}";
@@ -458,6 +464,13 @@ class DigEncodersUsermod : public Usermod {
       return;
     }
     segCmd(0, String("\"bri\":") + String(b));
+  }
+
+  // push and turn on encoder 2: effect speed for front and rear (the rear copies it from the front in syncRear)
+  void changeSpeed(int clicks) {
+    int sp = constrain((int)frontSeg().speed + clicks * constrain(speedStep, 1, 64), 0, 255);
+    segCmd(0, String("\"sx\":") + String(sp));
+    lastChange = millis();
   }
 
   void changeMix(int clicks) {
@@ -587,6 +600,8 @@ class DigEncodersUsermod : public Usermod {
       else if (e0 == 3) toggleOn(0);
     }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
+    int16_t s1 = g_speed;
+    if (s1) { g_speed = g_speed - s1; changeSpeed(s1); }
     int16_t d1 = g_delta[1];
     if (d1) { g_delta[1] = g_delta[1] - d1; changeMix(d1); }
     uint8_t e1 = g_event[1];
@@ -668,6 +683,7 @@ class DigEncodersUsermod : public Usermod {
     top["reverseEncoder2"] = invertEnc2;
     top["brightnessStep"] = briStep;
     top["whiteMixStepPercent"] = mixStep;
+    top["speedStep"] = speedStep;
     top["rearBrightnessPercent"] = rearPercent;
     top["whiteLevelPercent"] = whiteLevel;
     top["longPressMs"] = longPressMs;
@@ -686,6 +702,7 @@ class DigEncodersUsermod : public Usermod {
     top["savedEffect"] = sMode;
     top["savedPalette"] = sPal;
     top["savedWhiteMixPercent"] = sMix;
+    top["savedSpeed"] = sSpeed;
   }
 
   bool readFromConfig(JsonObject &root) override {
@@ -702,6 +719,7 @@ class DigEncodersUsermod : public Usermod {
     invertEnc2     = top["reverseEncoder2"] | invertEnc2;
     briStep        = top["brightnessStep"] | briStep;
     mixStep        = top["whiteMixStepPercent"] | mixStep;
+    speedStep      = top["speedStep"] | speedStep;
     rearPercent    = top["rearBrightnessPercent"] | rearPercent;
     whiteLevel     = top["whiteLevelPercent"] | whiteLevel;
     longPressMs    = top["longPressMs"] | longPressMs;
@@ -726,6 +744,7 @@ class DigEncodersUsermod : public Usermod {
       sMix      = top["savedWhiteMixPercent"] | sMix;
       sColor    = top["savedColorIndex"] | sColor;
       sHue      = top["savedHue"] | sHue;
+      sSpeed    = top["savedSpeed"] | sSpeed;
     }
     favDirty = true;
     pushSettingsToTask();
