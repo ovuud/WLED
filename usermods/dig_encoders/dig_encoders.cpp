@@ -469,8 +469,25 @@ class DigEncodersUsermod : public Usermod {
   // push and turn on encoder 2: effect speed for front and rear (the rear copies it from the front in syncRear)
   void changeSpeed(int clicks) {
     int sp = constrain((int)frontSeg().speed + clicks * constrain(speedStep, 1, 64), 0, 255);
-    segCmd(0, String("\"sx\":") + String(sp));
-    lastChange = millis();
+    // Wipe-type effects work out their position as (clock % cycle length), so a new speed (new cycle length) would make them jump
+    // back to some other point of the sweep. To keep the sweep where it is, the shared effect clock is shifted by the amount
+    // that puts the new cycle at the same point as the old one. (All segments run the same effect, so shifting the clock is safe.)
+    {
+      String nm = modeName(frontSeg().mode);
+      if (nm == "Wipe" || nm == "Sweep" || nm == "Wipe Random" || nm == "Sweep Random") {
+        uint32_t oldC = 750 + (uint32_t)(255 - frontSeg().speed) * 150;
+        uint32_t newC = 750 + (uint32_t)(255 - sp) * 150;
+        uint32_t now  = (uint32_t)(millis() + strip.timebase);
+        uint64_t keep = ((uint64_t)(now % oldC) * newC) / oldC;          // where in the new cycle we want to be
+        int64_t  shift = (int64_t)keep - (int64_t)(now % newC);           // how far the clock must move
+        strip.timebase = strip.timebase + (unsigned long)(int32_t)shift;
+      }
+    }
+    // front and rear get the new speed in ONE command (like the web page's slider does). Sending it to the front first and letting
+    // the rear catch up a moment later made the two run at different speeds for an instant, which showed up as flicker.
+    String c = String(",\"sx\":") + String(sp);
+    String j = String("{\"seg\":[{\"id\":0") + c + "}" + rearSegs(c) + "]}";
+    sendJson(j);
   }
 
   void changeMix(int clicks) {
