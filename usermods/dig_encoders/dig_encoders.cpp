@@ -146,6 +146,7 @@ class DigEncodersUsermod : public Usermod {
   int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1;   // sHue: 0..359 when the colour came from the hue wheel, else -1
 
   // ---- runtime ----
+  int      heldBri = -1;           // front brightness chosen while the front is OFF (-1 = none); applied when the front is switched on
   bool     rearUserOn = true;      // the rear's own on/off, set only by encoder 2 long push (WLED turns a segment ON whenever it is sent a brightness, so this is enforced explicitly)
   bool     started = false, wireStarted = false, mcpOk = false, favDirty = true, dirty = false;
   int      mixPct = 0;            // 0..100, used by handleOverlayDraw()
@@ -301,9 +302,15 @@ class DigEncodersUsermod : public Usermod {
     if (mcpOk && !g_task) xTaskCreatePinnedToCore(encTask, "digenc", 3072, nullptr, 2, &g_task, 0);
   }
 
+  // the front's brightness as the user sees it: while the front is off, the level chosen with encoder 1 in the meantime
+  int frontBriNow() {
+    Segment &f = frontSeg();
+    return (!f.on && heldBri >= 0) ? heldBri : (int)f.opacity;
+  }
+
   void captureState() {
     Segment &f = frontSeg();
-    sFrontOn = f.on; sFrontBri = f.opacity; sMode = f.mode; sPal = f.palette;
+    sFrontOn = f.on; sFrontBri = frontBriNow(); sMode = f.mode; sPal = f.palette;
     sRearOn = rearUserOn;
     sMix = mixPct;
   }
@@ -311,7 +318,7 @@ class DigEncodersUsermod : public Usermod {
   uint32_t makeSnapshot() {
     Segment &f = frontSeg();
     uint32_t h = 17;
-    h = h * 31 + f.on; h = h * 31 + f.opacity; h = h * 31 + f.mode; h = h * 31 + f.palette;
+    h = h * 31 + f.on; h = h * 31 + frontBriNow(); h = h * 31 + (uint32_t)(heldBri + 1); h = h * 31 + f.mode; h = h * 31 + f.palette;
     h = h * 31 + rearUserOn;
     h = h * 31 + (uint32_t)mixPct;
     h = h * 31 + (uint32_t)(sColor + 1);
@@ -423,8 +430,12 @@ class DigEncodersUsermod : public Usermod {
 
   void changeFrontBrightness(int clicks) {
     Segment &s = frontSeg();
-    if (!s.on) return;
-    int b = constrain((int)s.opacity + clicks * briStep, 2, 255);
+    int b = constrain(frontBriNow() + clicks * briStep, 2, 255);
+    if (!s.on) {                                       // front is off: remember the level, send nothing (a brightness would switch it on)
+      heldBri = b;
+      lastChange = millis();
+      return;
+    }
     segCmd(0, String("\"bri\":") + String(b));
   }
 
@@ -441,6 +452,12 @@ class DigEncodersUsermod : public Usermod {
       return;
     }
     Segment &s = strip.getSegment(id);
+    if (id == 0 && !s.on && heldBri >= 0) {            // switching the front on: apply the level chosen while it was off
+      segCmd(0, String("\"bri\":") + String(heldBri) + ",\"on\":true");
+      heldBri = -1;
+      return;
+    }
+    heldBri = -1;
     segCmd(id, String("\"on\":") + (s.on ? "false" : "true"));
   }
 
@@ -506,7 +523,7 @@ class DigEncodersUsermod : public Usermod {
     if (!wantOn) {
       if (r.on) add("\"on\":false");
     } else {
-      int target = rearBriFor((int)f.opacity);
+      int target = rearBriFor(frontBriNow());
       if ((int)r.opacity != target) { add(String("\"bri\":") + String(target)); add("\"on\":true"); }
       else if (!r.on) add("\"on\":true");
     }
