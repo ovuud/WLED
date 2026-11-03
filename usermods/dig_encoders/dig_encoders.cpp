@@ -425,19 +425,26 @@ class DigEncodersUsermod : public Usermod {
     uint8_t m = (sMode >= 0 && sMode < (int)strip.getModeCount()) ? (uint8_t)sMode : fxIds[0];
     int fb = constrain(sFrontBri, 2, 255);
     bool geometry = forceSegments && strip.isMatrix;
-    // map is 9 wide x 19 tall: columns 0-1 = rear strip 1 (LED in column 0, column 1 empty), columns 2-6 = front matrix (lit LEDs on every second row,
-    // level with the strip LEDs), columns 7-8 = rear strip 2 (column 7 empty, LED in column 8). A segment needs 2+ columns for WLED to treat it as 2D.
+    // Two layouts are understood, chosen by the width of the LED map:
+    //   9 wide x 19 tall: columns 0-1 = rear strip 1 (LED in column 0), columns 2-6 = front (lit LEDs on every second row, level with the
+    //                     strip LEDs), columns 7-8 = rear strip 2 (LED in column 8). A segment needs 2+ columns for WLED to treat it as 2D.
+    //   7 wide x 19 tall: columns 0-4 = front (5 wide x 10 tall), columns 5-6 = both rear strips side by side as one segment.
+    const bool wide = Segment::maxWidth >= 9;
     String j = "{\"on\":true,\"bri\":255,\"seg\":[{\"id\":0,";
-    if (geometry) j += "\"start\":2,\"stop\":7,\"startY\":0,\"stopY\":19,";
+    if (geometry) j += wide ? "\"start\":2,\"stop\":7,\"startY\":0,\"stopY\":19," : "\"start\":0,\"stop\":5,\"startY\":0,\"stopY\":10,";
     j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(fb) +
          ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "}";
     String rest = String("\"on\":") + ((rearUserOn && rearPercent > 0) ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
          ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m);
     j += ",{\"id\":1,";
-    if (geometry) j += "\"start\":0,\"stop\":2,\"startY\":0,\"stopY\":19,";
-    j += rest + "},{\"id\":2,";
-    if (geometry) j += "\"start\":7,\"stop\":9,\"startY\":0,\"stopY\":19,";
-    j += rest + "}]}";
+    if (geometry) j += wide ? "\"start\":0,\"stop\":2,\"startY\":0,\"stopY\":19," : "\"start\":5,\"stop\":7,\"startY\":0,\"stopY\":19,";
+    j += rest + "}";
+    if (wide) {
+      j += ",{\"id\":2,";
+      if (geometry) j += "\"start\":7,\"stop\":9,\"startY\":0,\"stopY\":19,";
+      j += rest + "}";
+    }
+    j += "]}";
     sendJson(j);
     snapshot = makeSnapshot();
   }
