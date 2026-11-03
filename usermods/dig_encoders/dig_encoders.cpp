@@ -146,6 +146,7 @@ class DigEncodersUsermod : public Usermod {
   int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1;   // sHue: 0..359 when the colour came from the hue wheel, else -1
 
   // ---- runtime ----
+  bool     rearUserOn = true;      // the rear's own on/off, set only by encoder 2 long push (WLED turns a segment ON whenever it is sent a brightness, so this is enforced explicitly)
   bool     started = false, wireStarted = false, mcpOk = false, favDirty = true, dirty = false;
   int      mixPct = 0;            // 0..100, used by handleOverlayDraw()
   uint32_t lastTick = 0, lastInitTry = 0, lastChange = 0, lastCheck = 0, snapshot = 0;
@@ -185,7 +186,7 @@ class DigEncodersUsermod : public Usermod {
   }
 
   int rearBriFor(int frontBri) {
-    return constrain((frontBri * constrain(rearPercent, 0, 100)) / 100, 0, 255);
+    return constrain((frontBri * constrain(rearPercent, 0, 100)) / 100, 1, 255);   // never 0: WLED treats a segment brightness of 0 as "off"
   }
 
   void resolveFavorites() {
@@ -303,7 +304,7 @@ class DigEncodersUsermod : public Usermod {
   void captureState() {
     Segment &f = frontSeg();
     sFrontOn = f.on; sFrontBri = f.opacity; sMode = f.mode; sPal = f.palette;
-    if (haveRear()) { Segment &r = rearSeg(); sRearOn = r.on; }
+    sRearOn = rearUserOn;
     sMix = mixPct;
   }
 
@@ -311,7 +312,7 @@ class DigEncodersUsermod : public Usermod {
     Segment &f = frontSeg();
     uint32_t h = 17;
     h = h * 31 + f.on; h = h * 31 + f.opacity; h = h * 31 + f.mode; h = h * 31 + f.palette;
-    if (haveRear()) { Segment &r = rearSeg(); h = h * 31 + r.on; }
+    h = h * 31 + rearUserOn;
     h = h * 31 + (uint32_t)mixPct;
     h = h * 31 + (uint32_t)(sColor + 1);
     h = h * 31 + (uint32_t)(sHue + 1);
@@ -402,6 +403,7 @@ class DigEncodersUsermod : public Usermod {
   void startup() {
     if (favDirty) resolveFavorites();
     mixPct = constrain(sMix, 0, 100);
+    rearUserOn = sRearOn;
     if (sColor < 0 || sColor >= (int)colIds.size()) sColor = 0;
     sPal = 2;                                          // palette "Color 1": every effect uses the chosen solid colour
     uint8_t m = (sMode >= 0 && sMode < (int)strip.getModeCount()) ? (uint8_t)sMode : fxIds[0];
@@ -413,7 +415,7 @@ class DigEncodersUsermod : public Usermod {
     j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(fb) +
          ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "},{\"id\":1,";
     if (geometry) j += "\"start\":5,\"stop\":7,\"startY\":0,\"stopY\":19,";
-    j += String("\"on\":") + (sRearOn ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
+    j += String("\"on\":") + ((rearUserOn && rearPercent > 0) ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
          ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + "}]}";
     sendJson(j);
     snapshot = makeSnapshot();
@@ -432,6 +434,12 @@ class DigEncodersUsermod : public Usermod {
   }
 
   void toggleOn(uint8_t id) {
+    if (id == 1) {                                     // rear: remembered by the firmware, enforced in syncRear()
+      rearUserOn = !rearUserOn;
+      if (rearUserOn && rearPercent == 0) rearPercent = 25;   // switching on at 0% would show nothing
+      lastChange = millis();
+      return;
+    }
     Segment &s = strip.getSegment(id);
     segCmd(id, String("\"on\":") + (s.on ? "false" : "true"));
   }
@@ -500,8 +508,11 @@ class DigEncodersUsermod : public Usermod {
     if (r.mode != f.mode) add(String("\"fx\":") + String((int)f.mode));
     if (r.speed != f.speed) add(String("\"sx\":") + String((int)f.speed));
     if (r.intensity != f.intensity) add(String("\"ix\":") + String((int)f.intensity));
+    // brightness and on/off are always sent together, because WLED switches a segment on whenever it receives a brightness
+    bool wantOn = rearUserOn && rearPercent > 0;
     int target = rearBriFor((int)f.opacity);
-    if ((int)r.opacity != target) add(String("\"bri\":") + String(target));
+    if ((int)r.opacity != target) { add(String("\"bri\":") + String(target)); add(String("\"on\":") + (wantOn ? "true" : "false")); }
+    else if (r.on != wantOn) add(String("\"on\":") + (wantOn ? "true" : "false"));
     if (fields.length()) segCmd(1, fields);
   }
 
