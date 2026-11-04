@@ -143,6 +143,7 @@ class DigEncodersUsermod : public Usermod {
   String effectColors   = "";                      // optional fixed pairs: Name=RRGGBB+RRGGBB, separate entries with commas
   String effectHueShift = "Wipe=15";               // Name=degrees: colour 2 = the chosen colour turned this many degrees clockwise on the wheel
   String stockColorEffects = "Colorwaves,PS Fire,PS Waterfall";   // effects that keep WLED's own colours: their stock palette, no chosen colour, no hue shift
+  String effectPalette  = "Railway=3";             // Name=paletteNumber: effects that take their shades from the palette; 3 = "Colors 1&2" (colour 1 to colour 2)
   String favColors      = "FF0000,FF4000,FF9000,FFE000,40FF00,00FF60,00FFFF,0060FF,0000FF,8000FF,FF00FF,FF0060";
 
   // ---- remembered state (saved automatically a few seconds after any change) ----
@@ -163,6 +164,8 @@ class DigEncodersUsermod : public Usermod {
   struct FxShift { uint8_t fx; int deg; };
   std::vector<FxShift> fxShifts;
   std::vector<uint8_t> stockIds;
+  struct FxPal { uint8_t fx; uint8_t pal; };
+  std::vector<FxPal> fxPals;
   String   missingNames;
 
   Segment &frontSeg() { return strip.getSegment(0); }
@@ -311,6 +314,23 @@ class DigEncodersUsermod : public Usermod {
         if (name.equalsIgnoreCase(modeName(i))) { stockIds.push_back(i); break; }
       }
     }
+    // effects that need a particular palette, written as  Name=number
+    fxPals.clear();
+    from = 0;
+    list = effectPalette + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String tok = list.substring(from, to);
+      from = to + 1;
+      int eq = tok.indexOf('=');
+      if (eq < 1) continue;
+      String name = tok.substring(0, eq); name.trim();
+      int pn = tok.substring(eq + 1).toInt();
+      for (uint8_t i = 0; i < strip.getModeCount(); i++) {
+        if (name.equalsIgnoreCase(modeName(i))) { fxPals.push_back({i, (uint8_t)constrain(pn, 0, 254)}); break; }
+      }
+    }
     favDirty = false;
   }
 
@@ -331,7 +351,11 @@ class DigEncodersUsermod : public Usermod {
   }
 
   // palette to use for effect fx: its own stock palette, or "Color 1" (id 2) so the chosen solid colour is what shows
-  int palForFx(uint8_t fx) { return isStock(fx) ? stockPalette(fx) : 2; }
+  int palForFx(uint8_t fx) {
+    if (isStock(fx)) return stockPalette(fx);
+    for (auto &p : fxPals) if (p.fx == fx) return p.pal;   // e.g. Railway needs "Colors 1&2" to show both colours
+    return 2;
+  }
 
   void pushSettingsToTask() {
     g_addr = (uint8_t)mcpAddr;
@@ -412,7 +436,7 @@ class DigEncodersUsermod : public Usermod {
     }
     sHue = (((sHue + clicks * 3) % 360) + 360) % 360;
     if (isStock(frontSeg().mode)) return;              // stock-colour effect: the choice is remembered for the next effect, nothing shown now
-    String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
+    String c = colJsonFor(frontSeg().mode) + ",\"pal\":" + String(palForFx(frontSeg().mode));
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     j += rearSegs(c);
     j += "]}";
@@ -585,7 +609,7 @@ class DigEncodersUsermod : public Usermod {
     sColor = (sColor + 1) % (int)colIds.size();
     sHue = -1;                                          // back to the colour list
     if (isStock(frontSeg().mode)) return;              // stock-colour effect: the choice is remembered for the next effect, nothing shown now
-    String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
+    String c = colJsonFor(frontSeg().mode) + ",\"pal\":" + String(palForFx(frontSeg().mode));
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     j += rearSegs(c);
     j += "]}";
@@ -751,6 +775,7 @@ class DigEncodersUsermod : public Usermod {
     top["effectColors"] = effectColors;
     top["effectHueShift"] = effectHueShift;
     top["stockColorEffects"] = stockColorEffects;
+    top["effectPalette"] = effectPalette;
     top["savedColorIndex"] = sColor;
     top["savedHue"] = sHue;
     top["savedFrontOn"] = sFrontOn;
@@ -792,6 +817,7 @@ class DigEncodersUsermod : public Usermod {
     if (ec[0]) effectColors = ec;
     const char *eh = top["effectHueShift"] | "";
     if (eh[0]) effectHueShift = eh;
+    if (!top["effectPalette"].isNull()) { const char *ep = top["effectPalette"]; if (ep) effectPalette = ep; }
     if (!top["stockColorEffects"].isNull()) { const char *sc = top["stockColorEffects"]; if (sc) stockColorEffects = sc; }
     if (!started) {                                   // saved state is only applied at boot
       sFrontOn  = top["savedFrontOn"] | sFrontOn;
