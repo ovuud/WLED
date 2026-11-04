@@ -142,6 +142,7 @@ class DigEncodersUsermod : public Usermod {
   String favPalettes    = "6,7,8,9,10,11,12,13,14,22,35,36,44,45,46,50";
   String effectColors   = "";                      // optional fixed pairs: Name=RRGGBB+RRGGBB, separate entries with commas
   String effectHueShift = "Wipe=15";               // Name=degrees: colour 2 = the chosen colour turned this many degrees clockwise on the wheel
+  String stockColorEffects = "Colorwaves,PS Fire,PS Waterfall";   // effects that keep WLED's own colours: their stock palette, no chosen colour, no hue shift
   String favColors      = "FF0000,FF4000,FF9000,FFE000,40FF00,00FF60,00FFFF,0060FF,0000FF,8000FF,FF00FF,FF0060";
 
   // ---- remembered state (saved automatically a few seconds after any change) ----
@@ -161,6 +162,7 @@ class DigEncodersUsermod : public Usermod {
   std::vector<FxPair> fxPairs;
   struct FxShift { uint8_t fx; int deg; };
   std::vector<FxShift> fxShifts;
+  std::vector<uint8_t> stockIds;
   String   missingNames;
 
   Segment &frontSeg() { return strip.getSegment(0); }
@@ -294,8 +296,42 @@ class DigEncodersUsermod : public Usermod {
         if (name.equalsIgnoreCase(modeName(i))) { fxShifts.push_back({i, deg}); break; }
       }
     }
+    // effects that keep WLED's own colours, by name
+    stockIds.clear();
+    from = 0;
+    list = stockColorEffects + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String name = list.substring(from, to);
+      from = to + 1;
+      name.trim();
+      if (!name.length()) continue;
+      for (uint8_t i = 0; i < strip.getModeCount(); i++) {
+        if (name.equalsIgnoreCase(modeName(i))) { stockIds.push_back(i); break; }
+      }
+    }
     favDirty = false;
   }
+
+  bool isStock(uint8_t fx) {
+    for (auto id : stockIds) if (id == fx) return true;
+    return false;
+  }
+
+  // the palette an effect is meant to start with (the "pal=" in its definition); 0 = WLED's default if it names none
+  int stockPalette(uint8_t fx) {
+    const char *d = strip.getModeData(fx);
+    if (!d) return 0;
+    String t;
+    char c;
+    while ((c = pgm_read_byte(d++))) t += c;
+    int i = t.indexOf("pal=");
+    return (i < 0) ? 0 : t.substring(i + 4).toInt();
+  }
+
+  // palette to use for effect fx: its own stock palette, or "Color 1" (id 2) so the chosen solid colour is what shows
+  int palForFx(uint8_t fx) { return isStock(fx) ? stockPalette(fx) : 2; }
 
   void pushSettingsToTask() {
     g_addr = (uint8_t)mcpAddr;
@@ -375,6 +411,7 @@ class DigEncodersUsermod : public Usermod {
       sHue = rgbToHue(base);
     }
     sHue = (((sHue + clicks * 3) % 360) + 360) % 360;
+    if (isStock(frontSeg().mode)) return;              // stock-colour effect: the choice is remembered for the next effect, nothing shown now
     String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     j += rearSegs(c);
@@ -400,6 +437,7 @@ class DigEncodersUsermod : public Usermod {
 
   // ,"col":[...] for effect fx: its own pair if it has one, otherwise the solid colour with colour 2 black
   String colJsonFor(uint8_t fx) {
+    if (isStock(fx)) return "";                        // stock-colour effects keep whatever colours WLED has
     uint32_t c1, c2;
     bool shifted = false;
     for (auto &p : fxShifts) if (p.fx == fx) {
@@ -426,8 +464,8 @@ class DigEncodersUsermod : public Usermod {
     mixPct = constrain(sMix, 0, 100);
     rearUserOn = sRearOn;
     if (sColor < 0 || sColor >= (int)colIds.size()) sColor = 0;
-    sPal = 2;                                          // palette "Color 1": every effect uses the chosen solid colour
     uint8_t m = (sMode >= 0 && sMode < (int)strip.getModeCount()) ? (uint8_t)sMode : fxIds[0];
+    sPal = palForFx(m);                                // palette "Color 1" (the chosen solid colour), or the effect's own palette for stock-colour effects
     int fb = constrain(sFrontBri, 2, 255);
     bool geometry = forceSegments && strip.isMatrix;
     // Two layouts are understood, chosen by the width of the LED map:
@@ -520,7 +558,7 @@ class DigEncodersUsermod : public Usermod {
     for (size_t i = 0; i < fxIds.size(); i++) if (fxIds[i] == f.mode) { idx = i; found = true; break; }
     size_t next = found ? (idx + 1) % fxIds.size() : 0;
     uint8_t fx = fxIds[next];
-    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":2" + colJsonFor(fx);
+    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx);
     String j = "{\"seg\":[{\"id\":0," + c + "}";
     j += rearSegs(String(",") + c);
     j += "]}";
@@ -546,6 +584,7 @@ class DigEncodersUsermod : public Usermod {
     if (colIds.empty()) return;
     sColor = (sColor + 1) % (int)colIds.size();
     sHue = -1;                                          // back to the colour list
+    if (isStock(frontSeg().mode)) return;              // stock-colour effect: the choice is remembered for the next effect, nothing shown now
     String c = colJsonFor(frontSeg().mode) + ",\"pal\":2";
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     j += rearSegs(c);
@@ -711,6 +750,7 @@ class DigEncodersUsermod : public Usermod {
     top["favoriteColors"] = favColors;
     top["effectColors"] = effectColors;
     top["effectHueShift"] = effectHueShift;
+    top["stockColorEffects"] = stockColorEffects;
     top["savedColorIndex"] = sColor;
     top["savedHue"] = sHue;
     top["savedFrontOn"] = sFrontOn;
@@ -752,6 +792,7 @@ class DigEncodersUsermod : public Usermod {
     if (ec[0]) effectColors = ec;
     const char *eh = top["effectHueShift"] | "";
     if (eh[0]) effectHueShift = eh;
+    if (!top["stockColorEffects"].isNull()) { const char *sc = top["stockColorEffects"]; if (sc) stockColorEffects = sc; }
     if (!started) {                                   // saved state is only applied at boot
       sFrontOn  = top["savedFrontOn"] | sFrontOn;
       sFrontBri = top["savedFrontBrightness"] | sFrontBri;
