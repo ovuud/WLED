@@ -108,7 +108,7 @@ static void encTask(void *) {
           else g_delta[i] = g_delta[i] + click;
         }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
-        btnUpdate(btn[i], i, pressed, now, i == 0);   // encoder 1 has a double click (colour relationship); encoder 2 acts at once
+        btnUpdate(btn[i], i, pressed, now, i == 1);   // encoder 2 has a double click (colour 1 / colour 2); encoder 1 acts at once
       }
     }
     vTaskDelay(1);
@@ -132,7 +132,6 @@ class DigEncodersUsermod : public Usermod {
   bool   invertEnc2     = false;
   int    briStep        = 8;    // brightness change per click (encoder 1)
   int    mixStep        = 5;    // white-mix change per click, in percent (encoder 2)
-  int    wideDeg        = 35;   // double click on encoder 1: the 'dramatic' colour relationship, in degrees (replaces the normal angle of every shifted effect)
   int    speedStep      = 8;    // effect-speed change per click (encoder 2, push and turn), out of 255
   int    whiteLevel     = 100;  // how strong the white LED is at 100% mix, relative to the colour it replaces (lower if the white looks brighter than the colour)
   int    rearPercent    = 70;   // rear brightness as a percentage of the front brightness (editable in the settings)
@@ -150,7 +149,13 @@ class DigEncodersUsermod : public Usermod {
   // ---- remembered state (saved automatically a few seconds after any change) ----
   bool sFrontOn = true, sRearOn = true;
   int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1, sSpeed = -1;
-  bool sWide = false;                              // true while the dramatic colour relationship is on   // sSpeed: effect speed 0..255, -1 = not chosen yet; sHue: 0..359 when the colour came from the hue wheel, else -1
+  // colour 2 of the two-colour effects (the ones listed in effectHueShift): its own colour once chosen (-1 / -1 = not chosen yet,
+  // then it follows colour 1 at the angle given in effectHueShift). Colour 1 and colour 2 are never allowed closer than minGapDeg on the wheel.
+  int  s2Color = -1, s2Hue = -1;
+  int  colorSel = 0;                               // what encoder 1's push-and-turn and encoder 2's short push change: 0 = colour 1, 1 = colour 2
+  static const int minGapDeg = 10;
+  uint32_t blinkUntil = 0, blinkTotal = 0;         // the lights dip once (colour 1) or twice (colour 2) after switching
+  // sSpeed: effect speed 0..255, -1 = not chosen yet; sHue: 0..359 when the colour came from the hue wheel, else -1
 
   // ---- runtime ----
   int      heldBri = -1;           // front brightness chosen while the front is OFF (-1 = none); applied when the front is switched on
@@ -399,7 +404,8 @@ class DigEncodersUsermod : public Usermod {
     h = h * 31 + (uint32_t)(sColor + 1);
     h = h * 31 + (uint32_t)(sHue + 1);
     h = h * 31 + f.speed;
-    h = h * 31 + (sWide ? 1 : 0);
+    h = h * 31 + (uint32_t)(s2Color + 1);
+    h = h * 31 + (uint32_t)(s2Hue + 1);
     h = h * 31 + (uint32_t)rearPercent;
     return h;
   }
@@ -431,19 +437,75 @@ class DigEncodersUsermod : public Usermod {
     return ((deg % 360) + 360) % 360;
   }
 
-  // push and turn on encoder 1: move around the hue wheel, 3 degrees per click, front and rear together
-  void changeHue(int clicks) {
-    if (sHue < 0) {
-      uint32_t base = (sColor >= 0 && sColor < (int)colIds.size()) ? colIds[sColor] : 0xFF0000;
-      sHue = rgbToHue(base);
-    }
-    sHue = (((sHue + clicks * 3) % 360) + 360) % 360;
-    if (isStock(frontSeg().mode)) return;              // stock-colour effect: the choice is remembered for the next effect, nothing shown now
-    String c = colJsonFor(frontSeg().mode) + ",\"pal\":" + String(palForFx(frontSeg().mode));
+  static int hueDist(int a, int b) {                  // distance between two hues on the wheel, 0..180
+    int d = (((a - b) % 360) + 360) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+
+  bool isTwoColor(uint8_t fx) {
+    for (auto &p : fxShifts) if (p.fx == fx) return true;
+    return false;
+  }
+  int shiftFor(uint8_t fx) {
+    for (auto &p : fxShifts) if (p.fx == fx) return p.deg;
+    return 0;
+  }
+  bool color2Chosen() { return s2Hue >= 0 || s2Color >= 0; }
+
+  // colour 1 as it stands
+  uint32_t color1Rgb() {
+    if (sHue >= 0) return hueToRgb(sHue);
+    if (sColor >= 0 && sColor < (int)colIds.size()) return colIds[sColor];
+    return 0xFF0000;
+  }
+  // colour 2 for effect fx: its own colour if chosen, otherwise colour 1 turned by the effect's angle
+  uint32_t color2Rgb(uint8_t fx) {
+    if (s2Hue >= 0) return hueToRgb(s2Hue);
+    if (s2Color >= 0 && s2Color < (int)colIds.size()) return colIds[s2Color];
+    return hueToRgb(rgbToHue(color1Rgb()) + shiftFor(fx));
+  }
+
+  // keep a new hue at least minGapDeg away from the other colour; when it would land inside the gap it jumps across it
+  int keepGap(int h, int dir, int other) {
+    h = ((h % 360) + 360) % 360;
+    if (hueDist(h, other) < minGapDeg) h = ((dir >= 0 ? other + minGapDeg : other - minGapDeg) % 360 + 360) % 360;
+    return h;
+  }
+
+  void sendColors() {
+    uint8_t m = frontSeg().mode;
+    if (isStock(m)) return;                            // stock-colour effect: the choice is remembered for the next effect, nothing shown now
+    String c = colJsonFor(m) + ",\"pal\":" + String(palForFx(m));
     String j = "{\"seg\":[{\"id\":0" + c + "}";
     j += rearSegs(c);
     j += "]}";
     sendJson(j);
+  }
+
+  // push and turn on encoder 1: move around the hue wheel, 3 degrees per click, front and rear together.
+  // On a two-colour effect this changes the colour chosen with a double click on encoder 2 (colour 1 or colour 2).
+  void changeHue(int clicks) {
+    uint8_t m = frontSeg().mode;
+    bool second = (colorSel == 1) && isTwoColor(m);
+    int dir = clicks >= 0 ? 1 : -1;
+    if (!second) {
+      int cur = (sHue >= 0) ? sHue : rgbToHue(color1Rgb());
+      int nh = cur + clicks * 3;
+      sHue = color2Chosen() ? keepGap(nh, dir, rgbToHue(color2Rgb(m))) : (((nh % 360) + 360) % 360);
+    } else {
+      int cur = (s2Hue >= 0) ? s2Hue : rgbToHue(color2Rgb(m));
+      s2Hue = keepGap(cur + clicks * 3, dir, rgbToHue(color1Rgb()));
+      s2Color = -1;
+    }
+    sendColors();
+  }
+
+  // double click on encoder 2: switch between changing colour 1 and colour 2 (one dip = colour 1, two dips = colour 2)
+  void toggleColorSel() {
+    colorSel = colorSel ? 0 : 1;
+    blinkTotal = (colorSel ? 2 : 1) * 200;
+    blinkUntil = millis() + blinkTotal;
+    lastChange = millis();
   }
 
   static String rgbArr(uint32_t c) {
@@ -469,7 +531,7 @@ class DigEncodersUsermod : public Usermod {
     bool shifted = false;
     for (auto &p : fxShifts) if (p.fx == fx) {
       c1 = solidColor();
-      c2 = hueToRgb(rgbToHue(c1) + (sWide ? wideDeg : p.deg));              // fully saturated colour on the outer rim of the wheel
+      c2 = color2Rgb(fx);                              // colour 2: its own colour, or colour 1 turned by the angle until you choose one
       shifted = true;
       break;
     }
@@ -531,18 +593,6 @@ class DigEncodersUsermod : public Usermod {
     segCmd(0, String("\"bri\":") + String(b));
   }
 
-  // double click on encoder 1: switch the second colour between the normal angle (e.g. 15 degrees) and the dramatic one (35)
-  void toggleWide() {
-    sWide = !sWide;
-    lastChange = millis();
-    if (isStock(frontSeg().mode)) return;              // stock-colour effect: nothing to show now
-    String c = colJsonFor(frontSeg().mode) + ",\"pal\":" + String(palForFx(frontSeg().mode));
-    String j = "{\"seg\":[{\"id\":0" + c + "}";
-    j += rearSegs(c);
-    j += "]}";
-    sendJson(j);
-  }
-
   // push and turn on encoder 2: effect speed for front and rear (the rear copies it from the front in syncRear)
   void changeSpeed(int clicks) {
     int sp = constrain((int)frontSeg().speed + clicks * constrain(speedStep, 1, 64), 0, 255);
@@ -597,6 +647,7 @@ class DigEncodersUsermod : public Usermod {
     for (size_t i = 0; i < fxIds.size(); i++) if (fxIds[i] == f.mode) { idx = i; found = true; break; }
     size_t next = found ? (idx + 1) % fxIds.size() : 0;
     uint8_t fx = fxIds[next];
+    colorSel = 0;                                      // a new effect starts on colour 1
     String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx);
     String j = "{\"seg\":[{\"id\":0," + c + "}";
     j += rearSegs(String(",") + c);
@@ -618,17 +669,22 @@ class DigEncodersUsermod : public Usermod {
     sendJson(j);
   }
 
-  // quick colour change: next solid colour on front and rear; palette set to "Color 1" (id 2)
+  // quick colour change: next solid colour from the list for the chosen colour (colour 1, or colour 2 on a two-colour effect),
+  // skipping any entry that would sit within minGapDeg of the other colour; palette set to "Color 1" (id 2)
   void nextColor() {
     if (colIds.empty()) return;
-    sColor = (sColor + 1) % (int)colIds.size();
-    sHue = -1;                                          // back to the colour list
-    if (isStock(frontSeg().mode)) return;              // stock-colour effect: the choice is remembered for the next effect, nothing shown now
-    String c = colJsonFor(frontSeg().mode) + ",\"pal\":" + String(palForFx(frontSeg().mode));
-    String j = "{\"seg\":[{\"id\":0" + c + "}";
-    j += rearSegs(c);
-    j += "]}";
-    sendJson(j);
+    uint8_t m = frontSeg().mode;
+    bool second = (colorSel == 1) && isTwoColor(m);
+    int &col = second ? s2Color : sColor;
+    int other = second ? rgbToHue(color1Rgb()) : (color2Chosen() ? rgbToHue(color2Rgb(m)) : -1);
+    int start = (col >= 0) ? col : -1;
+    for (size_t tries = 0; tries < colIds.size(); tries++) {
+      start = (start + 1) % (int)colIds.size();
+      if (other < 0 || hueDist(rgbToHue(colIds[start]), other) >= minGapDeg) break;
+    }
+    col = start;
+    if (second) s2Hue = -1; else sHue = -1;            // back to the colour list
+    sendColors();
   }
 
   // runs about 60 times per second: both rear strips always copy the front
@@ -692,7 +748,6 @@ class DigEncodersUsermod : public Usermod {
     if (e0) {
       g_event[0] = 0;
       if (e0 == 1) nextEffect();
-      else if (e0 == 2) toggleWide();
       else if (e0 == 3) toggleOn(0);
     }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
@@ -704,6 +759,7 @@ class DigEncodersUsermod : public Usermod {
     if (e1) {
       g_event[1] = 0;
       if (e1 == 1) nextColor();
+      else if (e1 == 2) toggleColorSel();
       else if (e1 == 3 && haveRear()) toggleOn(1);
     }
 
@@ -725,7 +781,19 @@ class DigEncodersUsermod : public Usermod {
 
   // Called just before every frame is sent to the LEDs: blends colour towards the warm-white LED.
   void handleOverlayDraw() override {
-    if (!enabled || !started || mixPct <= 0) return;
+    if (!enabled || !started) return;
+    if (blinkUntil && millis() < blinkUntil) {         // the lights dip once (colour 1) or twice (colour 2) after a double click on encoder 2
+      uint32_t slot = (blinkTotal - (blinkUntil - millis())) / 100;
+      if ((slot & 1) == 0) {
+        const unsigned total = strip.getLengthTotal();
+        for (unsigned i = 0; i < total; i++) {
+          uint32_t c = strip.getPixelColor(i);
+          if (!c) continue;
+          strip.setPixelColor(i, RGBW32(R(c) >> 3, G(c) >> 3, B(c) >> 3, W(c) >> 3));
+        }
+      }
+    } else blinkUntil = 0;
+    if (mixPct <= 0) return;
     // WLED applies gamma correction after this point, so a channel at half value only gives off ~22% of its light.
     // To keep the total light output constant across the knob's range, colour and white are mixed in "light" terms
     // (colour share = 1 - t, white share = t) and then converted back to channel values with 1/gamma.
@@ -780,7 +848,6 @@ class DigEncodersUsermod : public Usermod {
     top["brightnessStep"] = briStep;
     top["whiteMixStepPercent"] = mixStep;
     top["speedStep"] = speedStep;
-    top["dramaticShiftDegrees"] = wideDeg;
     top["rearBrightnessPercent"] = rearPercent;
     top["whiteLevelPercent"] = whiteLevel;
     top["longPressMs"] = longPressMs;
@@ -802,7 +869,8 @@ class DigEncodersUsermod : public Usermod {
     top["savedPalette"] = sPal;
     top["savedWhiteMixPercent"] = sMix;
     top["savedSpeed"] = sSpeed;
-    top["savedDramaticShift"] = sWide;
+    top["savedSecondColorIndex"] = s2Color;
+    top["savedSecondHue"] = s2Hue;
   }
 
   bool readFromConfig(JsonObject &root) override {
@@ -820,7 +888,6 @@ class DigEncodersUsermod : public Usermod {
     briStep        = top["brightnessStep"] | briStep;
     mixStep        = top["whiteMixStepPercent"] | mixStep;
     speedStep      = top["speedStep"] | speedStep;
-    wideDeg        = top["dramaticShiftDegrees"] | wideDeg;
     rearPercent    = top["rearBrightnessPercent"] | rearPercent;
     whiteLevel     = top["whiteLevelPercent"] | whiteLevel;
     longPressMs    = top["longPressMs"] | longPressMs;
@@ -848,7 +915,8 @@ class DigEncodersUsermod : public Usermod {
       sColor    = top["savedColorIndex"] | sColor;
       sHue      = top["savedHue"] | sHue;
       sSpeed    = top["savedSpeed"] | sSpeed;
-      sWide     = top["savedDramaticShift"] | sWide;
+      s2Color   = top["savedSecondColorIndex"] | s2Color;
+      s2Hue     = top["savedSecondHue"] | s2Hue;
     }
     favDirty = true;
     pushSettingsToTask();
