@@ -608,6 +608,17 @@ class DigEncodersUsermod : public Usermod {
         uint64_t keep = ((uint64_t)(now % oldC) * newC) / oldC;          // where in the new cycle we want to be
         int64_t  shift = (int64_t)keep - (int64_t)(now % newC);           // how far the clock must move
         strip.timebase = strip.timebase + (unsigned long)(int32_t)shift;
+      } else {
+        // Fade and Running work out their position as (clock x a number that depends on the speed). To keep the position where it
+        // is, the clock is rescaled by (old number / new number), so that clock x number stays the same.
+        uint32_t kOld = 0, kNew = 0;
+        if (nm == "Fade")         { kOld = (frontSeg().speed >> 3) + 10; kNew = ((uint32_t)sp >> 3) + 10; }
+        else if (nm == "Running") { kOld = frontSeg().speed;             kNew = (uint32_t)sp; }
+        if (kOld && kNew && kOld != kNew) {
+          uint32_t now  = (uint32_t)(millis() + strip.timebase);
+          uint32_t want = (uint32_t)(((uint64_t)now * kOld) / kNew);    // the clock value that keeps clock x number the same
+          strip.timebase = strip.timebase + (unsigned long)(uint32_t)(want - now);
+        }
       }
     }
     // front and rear get the new speed in ONE command (like the web page's slider does). Sending it to the front first and letting
