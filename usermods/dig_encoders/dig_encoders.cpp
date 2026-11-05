@@ -108,7 +108,7 @@ static void encTask(void *) {
           else g_delta[i] = g_delta[i] + click;
         }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
-        btnUpdate(btn[i], i, pressed, now, false);    // no double click any more: a short push acts at once
+        btnUpdate(btn[i], i, pressed, now, i == 0);   // encoder 1 has a double click (colour relationship); encoder 2 acts at once
       }
     }
     vTaskDelay(1);
@@ -132,6 +132,7 @@ class DigEncodersUsermod : public Usermod {
   bool   invertEnc2     = false;
   int    briStep        = 8;    // brightness change per click (encoder 1)
   int    mixStep        = 5;    // white-mix change per click, in percent (encoder 2)
+  int    wideDeg        = 35;   // double click on encoder 1: the 'dramatic' colour relationship, in degrees (replaces the normal angle of every shifted effect)
   int    speedStep      = 8;    // effect-speed change per click (encoder 2, push and turn), out of 255
   int    whiteLevel     = 100;  // how strong the white LED is at 100% mix, relative to the colour it replaces (lower if the white looks brighter than the colour)
   int    rearPercent    = 70;   // rear brightness as a percentage of the front brightness (editable in the settings)
@@ -148,7 +149,8 @@ class DigEncodersUsermod : public Usermod {
 
   // ---- remembered state (saved automatically a few seconds after any change) ----
   bool sFrontOn = true, sRearOn = true;
-  int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1, sSpeed = -1;   // sSpeed: effect speed 0..255, -1 = not chosen yet; sHue: 0..359 when the colour came from the hue wheel, else -1
+  int  sFrontBri = 200, sMode = -1, sPal = 6, sMix = 0, sColor = -1, sHue = -1, sSpeed = -1;
+  bool sWide = false;                              // true while the dramatic colour relationship is on   // sSpeed: effect speed 0..255, -1 = not chosen yet; sHue: 0..359 when the colour came from the hue wheel, else -1
 
   // ---- runtime ----
   int      heldBri = -1;           // front brightness chosen while the front is OFF (-1 = none); applied when the front is switched on
@@ -397,6 +399,7 @@ class DigEncodersUsermod : public Usermod {
     h = h * 31 + (uint32_t)(sColor + 1);
     h = h * 31 + (uint32_t)(sHue + 1);
     h = h * 31 + f.speed;
+    h = h * 31 + (sWide ? 1 : 0);
     h = h * 31 + (uint32_t)rearPercent;
     return h;
   }
@@ -466,7 +469,7 @@ class DigEncodersUsermod : public Usermod {
     bool shifted = false;
     for (auto &p : fxShifts) if (p.fx == fx) {
       c1 = solidColor();
-      c2 = hueToRgb(rgbToHue(c1) + p.deg);              // fully saturated colour on the outer rim of the wheel
+      c2 = hueToRgb(rgbToHue(c1) + (sWide ? wideDeg : p.deg));              // fully saturated colour on the outer rim of the wheel
       shifted = true;
       break;
     }
@@ -526,6 +529,18 @@ class DigEncodersUsermod : public Usermod {
       return;
     }
     segCmd(0, String("\"bri\":") + String(b));
+  }
+
+  // double click on encoder 1: switch the second colour between the normal angle (e.g. 15 degrees) and the dramatic one (35)
+  void toggleWide() {
+    sWide = !sWide;
+    lastChange = millis();
+    if (isStock(frontSeg().mode)) return;              // stock-colour effect: nothing to show now
+    String c = colJsonFor(frontSeg().mode) + ",\"pal\":" + String(palForFx(frontSeg().mode));
+    String j = "{\"seg\":[{\"id\":0" + c + "}";
+    j += rearSegs(c);
+    j += "]}";
+    sendJson(j);
   }
 
   // push and turn on encoder 2: effect speed for front and rear (the rear copies it from the front in syncRear)
@@ -677,6 +692,7 @@ class DigEncodersUsermod : public Usermod {
     if (e0) {
       g_event[0] = 0;
       if (e0 == 1) nextEffect();
+      else if (e0 == 2) toggleWide();
       else if (e0 == 3) toggleOn(0);
     }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
@@ -764,6 +780,7 @@ class DigEncodersUsermod : public Usermod {
     top["brightnessStep"] = briStep;
     top["whiteMixStepPercent"] = mixStep;
     top["speedStep"] = speedStep;
+    top["dramaticShiftDegrees"] = wideDeg;
     top["rearBrightnessPercent"] = rearPercent;
     top["whiteLevelPercent"] = whiteLevel;
     top["longPressMs"] = longPressMs;
@@ -785,6 +802,7 @@ class DigEncodersUsermod : public Usermod {
     top["savedPalette"] = sPal;
     top["savedWhiteMixPercent"] = sMix;
     top["savedSpeed"] = sSpeed;
+    top["savedDramaticShift"] = sWide;
   }
 
   bool readFromConfig(JsonObject &root) override {
@@ -802,6 +820,7 @@ class DigEncodersUsermod : public Usermod {
     briStep        = top["brightnessStep"] | briStep;
     mixStep        = top["whiteMixStepPercent"] | mixStep;
     speedStep      = top["speedStep"] | speedStep;
+    wideDeg        = top["dramaticShiftDegrees"] | wideDeg;
     rearPercent    = top["rearBrightnessPercent"] | rearPercent;
     whiteLevel     = top["whiteLevelPercent"] | whiteLevel;
     longPressMs    = top["longPressMs"] | longPressMs;
@@ -829,6 +848,7 @@ class DigEncodersUsermod : public Usermod {
       sColor    = top["savedColorIndex"] | sColor;
       sHue      = top["savedHue"] | sHue;
       sSpeed    = top["savedSpeed"] | sSpeed;
+      sWide     = top["savedDramaticShift"] | sWide;
     }
     favDirty = true;
     pushSettingsToTask();
