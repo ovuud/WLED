@@ -130,6 +130,7 @@ class DigEncodersUsermod : public Usermod {
   int    stepsPerClick  = 4;    // 4 for most encoders; use 2 for 30-detent/15-pulse versions
   bool   invertEnc1     = false;
   bool   invertEnc2     = false;
+  bool   rearFlipX      = true;   // flip the rear left <-> right at startup (matches the wiring: the data is fed into the strip that sits on the other side)
   int    briStep        = 8;    // brightness change per click (encoder 1)
   int    mixStep        = 5;    // white-mix change per click, in percent (encoder 2)
   int    speedStep      = 8;    // effect-speed change per click (encoder 2, push and turn), out of 255
@@ -568,7 +569,7 @@ class DigEncodersUsermod : public Usermod {
     j += String("\"on\":") + (sFrontOn ? "true" : "false") + ",\"bri\":" + String(fb) +
          ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + spd + "}";
     String rest = String("\"on\":") + ((rearUserOn && rearPercent > 0) ? "true" : "false") + ",\"bri\":" + String(rearBriFor(fb)) +
-         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + spd;
+         ",\"fx\":" + String((int)m) + ",\"pal\":" + String(sPal) + colJsonFor(m) + spd + (rearFlipX ? ",\"rev\":true" : ",\"rev\":false");
     j += ",{\"id\":1,";
     if (geometry) j += wide ? "\"start\":0,\"stop\":2,\"startY\":0,\"stopY\":19," : "\"start\":5,\"stop\":7,\"startY\":0,\"stopY\":19,";
     j += rest + "}";
@@ -856,6 +857,7 @@ class DigEncodersUsermod : public Usermod {
     top["stepsPerClick"] = stepsPerClick;
     top["reverseEncoder1"] = invertEnc1;
     top["reverseEncoder2"] = invertEnc2;
+    top["rearFlipLeftRight"] = rearFlipX;
     top["brightnessStep"] = briStep;
     top["whiteMixStepPercent"] = mixStep;
     top["speedStep"] = speedStep;
@@ -896,6 +898,7 @@ class DigEncodersUsermod : public Usermod {
     stepsPerClick  = top["stepsPerClick"] | stepsPerClick;
     invertEnc1     = top["reverseEncoder1"] | invertEnc1;
     invertEnc2     = top["reverseEncoder2"] | invertEnc2;
+    rearFlipX      = top["rearFlipLeftRight"] | rearFlipX;
     briStep        = top["brightnessStep"] | briStep;
     mixStep        = top["whiteMixStepPercent"] | mixStep;
     speedStep      = top["speedStep"] | speedStep;
