@@ -5,7 +5,8 @@
 //                long push = front on/off,
 //                push and turn = move the colour around the hue wheel in 3 degree steps
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
-//                short push = next solid colour, long push = rear on/off
+//                short push = nothing, double click = switch between colour 1 and colour 2, long push = rear on/off,
+//                push and turn = effect speed
 //   Some effects use a second colour that is a fixed number of degrees further round the colour wheel than the
 //   chosen colour (setting effectHueShift, default Wipe=15). Fixed colour pairs are also possible (effectColors).
 //   The rear segment (segment 1) always copies the front's effect, speed, intensity and colour.
@@ -770,7 +771,7 @@ class DigEncodersUsermod : public Usermod {
     uint8_t e1 = g_event[1];
     if (e1) {
       g_event[1] = 0;
-      if (e1 == 1) nextColor();
+      if (e1 == 1) { /* short push on encoder 2 does nothing (removed on purpose) */ }
       else if (e1 == 2) toggleColorSel();
       else if (e1 == 3 && haveRear()) toggleOn(1);
     }
