@@ -2,11 +2,11 @@
 //
 // Two rotary encoders with push buttons, read through an Adafruit MCP23017 port expander (I2C).
 //   Encoder 1 -> front segment (segment 0): turn = brightness (rear follows), short push = next favorite effect,
-//                long push = front on/off,
+//                double click = switch between colour 1 and colour 2, long push = front on/off,
 //                push and turn = move the colour around the hue wheel in 3 degree steps
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
-//                short push = nothing, double click = switch between colour 1 and colour 2, long push = rear on/off,
-//                push and turn = effect speed
+//                short push = speed in 20% steps (20/40/60/80/100%, then back to 20%), long push = rear on/off,
+//                push and turn = nothing
 //   Some effects use a second colour that is a fixed number of degrees further round the colour wheel than the
 //   chosen colour (setting effectHueShift, default Wipe=15). Fixed colour pairs are also possible (effectColors).
 //   The rear segment (segment 1) always copies the front's effect, speed, intensity and colour.
@@ -105,11 +105,11 @@ static void encTask(void *) {
         else if (acc[i] <= -(int8_t)g_steps) { click = -1; acc[i] = 0; }
         if (click) {
           if (i == 0 && btn[0].stable) { g_hue = g_hue + click; btn[0].turned = true; }   // push and turn = hue wheel
-          else if (i == 1 && btn[1].stable) { g_speed = g_speed + click; btn[1].turned = true; }   // push and turn on encoder 2 = effect speed
+          else if (i == 1 && btn[1].stable) { btn[1].turned = true; }   // push and turn on encoder 2 = nothing (turning is ignored while pressed)
           else g_delta[i] = g_delta[i] + click;
         }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
-        btnUpdate(btn[i], i, pressed, now, i == 1);   // encoder 2 has a double click (colour 1 / colour 2); encoder 1 acts at once
+        btnUpdate(btn[i], i, pressed, now, i == 0);   // encoder 1 has a double click (colour 1 / colour 2); encoder 2 acts at once
       }
     }
     vTaskDelay(1);
@@ -596,8 +596,16 @@ class DigEncodersUsermod : public Usermod {
   }
 
   // push and turn on encoder 2: effect speed for front and rear (the rear copies it from the front in syncRear)
-  void changeSpeed(int clicks) {
-    int sp = constrain((int)frontSeg().speed + clicks * constrain(speedStep, 1, 64), 0, 255);
+  // short push on encoder 2: speed goes up in 20% steps (20, 40, 60, 80, 100) and then starts again at 20%
+  void cycleSpeed() {
+    int pct  = ((int)frontSeg().speed * 100 + 127) / 255;          // current speed in percent
+    int next = (pct / 20) * 20 + 20;                               // next 20% step above the current one
+    if (next > 100) next = 20;
+    setSpeed((next * 255 + 50) / 100);
+  }
+
+  void setSpeed(int sp) {
+    sp = constrain(sp, 0, 255);
     // Wipe-type effects work out their position as (clock % cycle length), so a new speed (new cycle length) would make them jump
     // back to some other point of the sweep. To keep the sweep where it is, the shared effect clock is shifted by the amount
     // that puts the new cycle at the same point as the old one. (All segments run the same effect, so shifting the clock is safe.)
@@ -761,18 +769,18 @@ class DigEncodersUsermod : public Usermod {
     if (e0) {
       g_event[0] = 0;
       if (e0 == 1) nextEffect();
+      else if (e0 == 2) toggleColorSel();
       else if (e0 == 3) toggleOn(0);
     }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
     int16_t s1 = g_speed;
-    if (s1) { g_speed = g_speed - s1; changeSpeed(s1); }
+    if (s1) { g_speed = g_speed - s1; }   // (push and turn on encoder 2 does nothing; the count is simply discarded)
     int16_t d1 = g_delta[1];
     if (d1) { g_delta[1] = g_delta[1] - d1; changeMix(d1); }
     uint8_t e1 = g_event[1];
     if (e1) {
       g_event[1] = 0;
-      if (e1 == 1) { /* short push on encoder 2 does nothing (removed on purpose) */ }
-      else if (e1 == 2) toggleColorSel();
+      if (e1 == 1) cycleSpeed();
       else if (e1 == 3 && haveRear()) toggleOn(1);
     }
 
