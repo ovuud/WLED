@@ -5,7 +5,8 @@
 //                double click = switch between colour 1 and colour 2, long push = front on/off,
 //                push and turn = move the colour around the hue wheel in 3 degree steps
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
-//                short push = speed in 20% steps (20/40/60/80/100%, then back to 20%), long push = rear on/off,
+//                short push = speed in 20% steps (20/40/60/80/100%, then back to 20%), double click = next saved colour pair
+//                (setting colorPairs), long push = rear on/off,
 //                push and turn = nothing
 //   Some effects use a second colour that is a fixed number of degrees further round the colour wheel than the
 //   chosen colour (setting effectHueShift, default Wipe=15). Fixed colour pairs are also possible (effectColors).
@@ -109,7 +110,7 @@ static void encTask(void *) {
           else g_delta[i] = g_delta[i] + click;
         }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
-        btnUpdate(btn[i], i, pressed, now, i == 0);   // encoder 1 has a double click (colour 1 / colour 2); encoder 2 acts at once
+        btnUpdate(btn[i], i, pressed, now, true);     // both encoders have a double click (encoder 1: colour 1 / colour 2; encoder 2: next saved colour pair)
       }
     }
     vTaskDelay(1);
@@ -142,7 +143,8 @@ class DigEncodersUsermod : public Usermod {
   bool   forceSegments  = true; // rebuild the two segments at every boot (needs the 2D matrix set up)
   String favEffects     = "Wipe,Colorloop,Rainbow,Palette,Aurora,Fire 2012,Plasma,Noise2D,Soap,Lissajous,Matrix,Game Of Life,Waving Cell,Plasma Ball,Distortion Waves,Blobs,Drift,Drift Rose,Julia,Squared Swirl,Ghost Rider,Hiphotic,Polar Lights,Sun Radiation,Washing Machine";
   String favPalettes    = "6,7,8,9,10,11,12,13,14,22,35,36,44,45,46,50";
-  String effectColors   = "";                      // optional fixed pairs: Name=RRGGBB+RRGGBB, separate entries with commas
+  String colorPairs     = "";                      // saved colour pairs, RRGGBB+RRGGBB separated by commas; double click on encoder 2 steps through them
+  String effectColors   = "";                    // optional fixed pairs: Name=RRGGBB+RRGGBB, separate entries with commas
   String effectHueShift = "Wipe=15";               // Name=degrees: colour 2 = the chosen colour turned this many degrees clockwise on the wheel
   String stockColorEffects = "Colorwaves,PS Fire,PS Waterfall";   // effects that keep WLED's own colours: their stock palette, no chosen colour, no hue shift
   String effectPalette  = "Railway=3";             // Name=paletteNumber: effects that take their shades from the palette; 3 = "Colors 1&2" (colour 1 to colour 2)
@@ -170,6 +172,9 @@ class DigEncodersUsermod : public Usermod {
   std::vector<uint32_t> colIds;
   struct FxPair { uint8_t fx; uint32_t c1, c2; };
   std::vector<FxPair> fxPairs;
+  struct ColPair { uint32_t c1, c2; };
+  std::vector<ColPair> colPairs;
+  int pairIdx = -1;                                // which saved colour pair was used last (-1 = none yet)
   struct FxShift { uint8_t fx; int deg; };
   std::vector<FxShift> fxShifts;
   std::vector<uint8_t> stockIds;
@@ -290,6 +295,27 @@ class DigEncodersUsermod : public Usermod {
           break;
         }
       }
+    }
+    // saved colour pairs to click through (double click on encoder 2), written as  RRGGBB+RRGGBB, separated by commas
+    colPairs.clear();
+    from = 0;
+    list = colorPairs + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String tok = list.substring(from, to);
+      from = to + 1;
+      tok.trim();
+      int plus = tok.indexOf('+');
+      if (plus < 1) continue;
+      String a = tok.substring(0, plus); a.trim();
+      String b = tok.substring(plus + 1); b.trim();
+      if (a.startsWith("#")) a = a.substring(1);
+      if (b.startsWith("#")) b = b.substring(1);
+      if (a.length() != 6 || b.length() != 6) continue;
+      uint32_t ca = (uint32_t)strtoul(a.c_str(), nullptr, 16), cb = (uint32_t)strtoul(b.c_str(), nullptr, 16);
+      if (hueDist(rgbToHue(ca), rgbToHue(cb)) < minGapDeg) continue;   // colours closer than the minimum gap are skipped
+      colPairs.push_back({ca, cb});
     }
     // effects whose second colour is the chosen colour turned by some degrees, written as  Name=degrees
     fxShifts.clear();
@@ -708,6 +734,21 @@ class DigEncodersUsermod : public Usermod {
     sendColors();
   }
 
+  // double click on encoder 2: next saved colour pair (colour 1 + colour 2), front and rear together. The colours are placed on the
+  // hue wheel, so they are shown at full saturation. One dip of the lights confirms the change.
+  void nextPair() {
+    if (colPairs.empty()) return;
+    pairIdx = (pairIdx + 1) % (int)colPairs.size();
+    sHue  = rgbToHue(colPairs[pairIdx].c1);
+    s2Hue = rgbToHue(colPairs[pairIdx].c2);
+    s2Color = -1;
+    colorSel = 0;
+    blinkTotal = 200;
+    blinkUntil = millis() + blinkTotal;
+    lastChange = millis();
+    sendColors();
+  }
+
   // runs about 60 times per second: both rear strips always copy the front
   void syncRear() {
     if (!haveRear()) return;
@@ -781,6 +822,7 @@ class DigEncodersUsermod : public Usermod {
     if (e1) {
       g_event[1] = 0;
       if (e1 == 1) cycleSpeed();
+      else if (e1 == 2) nextPair();
       else if (e1 == 3 && haveRear()) toggleOn(1);
     }
 
@@ -879,6 +921,7 @@ class DigEncodersUsermod : public Usermod {
     top["favoritePalettes"] = favPalettes;
     top["favoriteColors"] = favColors;
     top["effectColors"] = effectColors;
+    top["colorPairs"] = colorPairs;
     top["effectHueShift"] = effectHueShift;
     top["stockColorEffects"] = stockColorEffects;
     top["effectPalette"] = effectPalette;
@@ -924,6 +967,7 @@ class DigEncodersUsermod : public Usermod {
     if (fc[0]) favColors = fc;
     const char *ec = top["effectColors"] | "";
     if (ec[0]) effectColors = ec;
+    if (!top["colorPairs"].isNull()) { const char *cp = top["colorPairs"]; if (cp) colorPairs = cp; }
     const char *eh = top["effectHueShift"] | "";
     if (eh[0]) effectHueShift = eh;
     if (!top["effectPalette"].isNull()) { const char *ep = top["effectPalette"]; if (ep) effectPalette = ep; }
