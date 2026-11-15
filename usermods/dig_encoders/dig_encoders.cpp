@@ -182,6 +182,7 @@ class DigEncodersUsermod : public Usermod {
   bool     rearUserOn = true;      // the rear's own on/off, set only by encoder 2 long push (WLED turns a segment ON whenever it is sent a brightness, so this is enforced explicitly)
   bool     started = false, wireStarted = false, mcpOk = false, favDirty = true, dirty = false;
   int      mixPct = 0;            // 0..100, used by handleOverlayDraw()
+  volatile uint8_t webCmd = 0;    // command asked for from the WLED page: 1 effect, 2 pair, 3 speed, 4 colour select, 5 reset
   uint32_t lastTick = 0, lastInitTry = 0, lastChange = 0, lastCheck = 0, snapshot = 0;
   std::vector<uint8_t> fxIds;
   std::vector<uint8_t> palIds;
@@ -867,6 +868,14 @@ class DigEncodersUsermod : public Usermod {
       else if (e0 == 3) toggleOn(0);
     }
     if (g_reset) { g_reset = 0; resetAll(); }
+    if (webCmd) {                                      // a command from the WLED page (see readFromJsonState)
+      uint8_t w = webCmd; webCmd = 0;
+      if      (w == 1) nextEffect();
+      else if (w == 2) nextPair();
+      else if (w == 3) cycleSpeed();
+      else if (w == 4) toggleColorSel();
+      else if (w == 5) resetAll();
+    }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
     int16_t s1 = g_speed;
     if (s1) { g_speed = g_speed - s1; }   // (push and turn on encoder 2 does nothing; the count is simply discarded)
@@ -992,6 +1001,18 @@ class DigEncodersUsermod : public Usermod {
     top["savedSecondHue"] = s2Hue;
     top["savedExactColor1"] = ex1;
     top["savedExactColor2"] = ex2;
+  }
+
+  // Commands from the WLED page: a preset whose API command is  {"digCmd":"pair"}  (or effect / speed / select / reset) does the same as the knob.
+  // Nothing is run here: WLED is in the middle of reading a command, so the request is only noted and carried out in loop().
+  void readFromJsonState(JsonObject &root) override {
+    const char *c = root["digCmd"] | "";
+    if (!c[0]) return;
+    if      (!strcmp(c, "effect")) webCmd = 1;     // = encoder 1 short push
+    else if (!strcmp(c, "pair"))   webCmd = 2;     // = encoder 2 double click
+    else if (!strcmp(c, "speed"))  webCmd = 3;     // = encoder 2 short push
+    else if (!strcmp(c, "select")) webCmd = 4;     // = encoder 1 double click
+    else if (!strcmp(c, "reset"))  webCmd = 5;     // = both buttons held for 5 seconds
   }
 
   bool readFromConfig(JsonObject &root) override {
