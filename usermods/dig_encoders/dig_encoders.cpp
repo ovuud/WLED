@@ -156,6 +156,9 @@ class DigEncodersUsermod : public Usermod {
   // colour 2 of the two-colour effects (the ones listed in effectHueShift): its own colour once chosen (-1 / -1 = not chosen yet,
   // then it follows colour 1 at the angle given in effectHueShift). Colour 1 and colour 2 are never allowed closer than minGapDeg on the wheel.
   int  s2Color = -1, s2Hue = -1;
+  // exact colours from a saved colour pair (RRGGBB as a number, -1 = none): used as they are, pale or not. Moving a colour with
+  // push and turn clears that colour's exact value, and it goes back to a full-strength colour at its hue.
+  int  ex1 = -1, ex2 = -1;
   int  colorSel = 0;                               // what encoder 1's push-and-turn and encoder 2's short push change: 0 = colour 1, 1 = colour 2
   static const int minGapDeg = 10;
   uint32_t blinkUntil = 0, blinkTotal = 0;         // the lights dip once (colour 1) or twice (colour 2) after switching
@@ -434,6 +437,8 @@ class DigEncodersUsermod : public Usermod {
     h = h * 31 + f.speed;
     h = h * 31 + (uint32_t)(s2Color + 1);
     h = h * 31 + (uint32_t)(s2Hue + 1);
+    h = h * 31 + (uint32_t)(ex1 + 1);
+    h = h * 31 + (uint32_t)(ex2 + 1);
     h = h * 31 + (uint32_t)rearPercent;
     return h;
   }
@@ -478,16 +483,18 @@ class DigEncodersUsermod : public Usermod {
     for (auto &p : fxShifts) if (p.fx == fx) return p.deg;
     return 0;
   }
-  bool color2Chosen() { return s2Hue >= 0 || s2Color >= 0; }
+  bool color2Chosen() { return ex2 >= 0 || s2Hue >= 0 || s2Color >= 0; }
 
   // colour 1 as it stands
   uint32_t color1Rgb() {
+    if (ex1 >= 0) return (uint32_t)ex1;
     if (sHue >= 0) return hueToRgb(sHue);
     if (sColor >= 0 && sColor < (int)colIds.size()) return colIds[sColor];
     return 0xFF0000;
   }
   // colour 2 for effect fx: its own colour if chosen, otherwise colour 1 turned by the effect's angle
   uint32_t color2Rgb(uint8_t fx) {
+    if (ex2 >= 0) return (uint32_t)ex2;
     if (s2Hue >= 0) return hueToRgb(s2Hue);
     if (s2Color >= 0 && s2Color < (int)colIds.size()) return colIds[s2Color];
     return hueToRgb(rgbToHue(color1Rgb()) + shiftFor(fx));
@@ -519,11 +526,13 @@ class DigEncodersUsermod : public Usermod {
     if (!second) {
       int cur = (sHue >= 0) ? sHue : rgbToHue(color1Rgb());
       int nh = cur + clicks * 3;
+      ex1 = -1;                                          // moving the colour leaves the exact (possibly pale) pair colour
       sHue = color2Chosen() ? keepGap(nh, dir, rgbToHue(color2Rgb(m))) : (((nh % 360) + 360) % 360);
     } else {
       int cur = (s2Hue >= 0) ? s2Hue : rgbToHue(color2Rgb(m));
       s2Hue = keepGap(cur + clicks * 3, dir, rgbToHue(color1Rgb()));
       s2Color = -1;
+      ex2 = -1;
     }
     sendColors();
   }
@@ -547,6 +556,7 @@ class DigEncodersUsermod : public Usermod {
 
   // the remembered solid colour (what a double click / push-and-turn last chose)
   uint32_t solidColor() {
+    if (ex1 >= 0) return (uint32_t)ex1;
     if (sHue >= 0) return hueToRgb(sHue);
     if (sColor >= 0 && sColor < (int)colIds.size()) return colIds[sColor];
     return 0xFF0000;
@@ -730,7 +740,7 @@ class DigEncodersUsermod : public Usermod {
       if (other < 0 || hueDist(rgbToHue(colIds[start]), other) >= minGapDeg) break;
     }
     col = start;
-    if (second) s2Hue = -1; else sHue = -1;            // back to the colour list
+    if (second) { s2Hue = -1; ex2 = -1; } else { sHue = -1; ex1 = -1; }            // back to the colour list
     sendColors();
   }
 
@@ -739,7 +749,9 @@ class DigEncodersUsermod : public Usermod {
   void nextPair() {
     if (colPairs.empty()) return;
     pairIdx = (pairIdx + 1) % (int)colPairs.size();
-    sHue  = rgbToHue(colPairs[pairIdx].c1);
+    ex1 = (int)(colPairs[pairIdx].c1 & 0xFFFFFF);      // the exact colours of the pair
+    ex2 = (int)(colPairs[pairIdx].c2 & 0xFFFFFF);
+    sHue  = rgbToHue(colPairs[pairIdx].c1);            // their positions on the wheel (used if a colour is moved afterwards)
     s2Hue = rgbToHue(colPairs[pairIdx].c2);
     s2Color = -1;
     colorSel = 0;
@@ -936,6 +948,8 @@ class DigEncodersUsermod : public Usermod {
     top["savedSpeed"] = sSpeed;
     top["savedSecondColorIndex"] = s2Color;
     top["savedSecondHue"] = s2Hue;
+    top["savedExactColor1"] = ex1;
+    top["savedExactColor2"] = ex2;
   }
 
   bool readFromConfig(JsonObject &root) override {
@@ -984,6 +998,8 @@ class DigEncodersUsermod : public Usermod {
       sSpeed    = top["savedSpeed"] | sSpeed;
       s2Color   = top["savedSecondColorIndex"] | s2Color;
       s2Hue     = top["savedSecondHue"] | s2Hue;
+      ex1       = top["savedExactColor1"] | ex1;
+      ex2       = top["savedExactColor2"] | ex2;
     }
     favDirty = true;
     pushSettingsToTask();
