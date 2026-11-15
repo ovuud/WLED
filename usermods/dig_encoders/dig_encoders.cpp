@@ -5,7 +5,7 @@
 //                double click = switch between colour 1 and colour 2, long push = front on/off,
 //                push and turn = move the colour around the hue wheel in 3 degree steps
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
-//                short push = speed in 20% steps (20/40/60/80/100%, then back to 20%), double click = next saved colour pair
+//                short push = speed in steps (10/20/40/60/80%, then back to 10%), double click = next saved colour pair
 //                (setting colorPairs), long push = rear on/off,
 //   Both buttons held together for 5 seconds = reset (first effect, first colour pair, middle speed, white mix 0, front and rear on),
 //                push and turn = nothing
@@ -645,11 +645,12 @@ class DigEncodersUsermod : public Usermod {
   }
 
   // push and turn on encoder 2: effect speed for front and rear (the rear copies it from the front in syncRear)
-  // short push on encoder 2: speed goes up in 20% steps (20, 40, 60, 80, 100) and then starts again at 20%
+  // short push on encoder 2: speed goes up through 10, 20, 40, 60, 80 percent and then starts again at 10%
   void cycleSpeed() {
+    static const int steps[5] = {10, 20, 40, 60, 80};
     int pct  = ((int)frontSeg().speed * 100 + 127) / 255;          // current speed in percent
-    int next = (pct / 20) * 20 + 20;                               // next 20% step above the current one
-    if (next > 100) next = 20;
+    int next = steps[0];                                           // above the last step (or on the web page's 100%): back to 10%
+    for (int i = 0; i < 5; i++) if (steps[i] > pct) { next = steps[i]; break; }
     setSpeed((next * 255 + 50) / 100);
   }
 
