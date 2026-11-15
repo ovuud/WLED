@@ -330,7 +330,7 @@ class DigEncodersUsermod : public Usermod {
       if (b.startsWith("#")) b = b.substring(1);
       if (a.length() != 6 || b.length() != 6) continue;
       uint32_t ca = (uint32_t)strtoul(a.c_str(), nullptr, 16), cb = (uint32_t)strtoul(b.c_str(), nullptr, 16);
-      if (hueDist(rgbToHue(ca), rgbToHue(cb)) < minGapDeg) continue;   // colours closer than the minimum gap are skipped
+      // (saved pairs are used exactly as written: the 10 degree minimum gap only applies when colours are moved with the knobs)
       colPairs.push_back({ca, cb});
     }
     // effects whose second colour is the chosen colour turned by some degrees, written as  Name=degrees
