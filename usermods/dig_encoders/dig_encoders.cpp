@@ -7,6 +7,7 @@
 //   Encoder 2 -> turn = white mix (0% = colour only ... 100% = warm white only, both segments),
 //                short push = speed in 20% steps (20/40/60/80/100%, then back to 20%), double click = next saved colour pair
 //                (setting colorPairs), long push = rear on/off,
+//   Both buttons held together for 5 seconds = reset (first effect, first colour pair, middle speed, white mix 0, front and rear on),
 //                push and turn = nothing
 //   Some effects use a second colour that is a fixed number of degrees further round the colour wheel than the
 //   chosen colour (setting effectHueShift, default Wipe=15). Fixed colour pairs are also possible (effectColors).
@@ -30,6 +31,7 @@
 static volatile int16_t  g_delta[2]  = {0, 0};      // clicks turned since last read (+ / -)
 static volatile int16_t  g_hue       = 0;           // clicks turned on encoder 1 while its button was held down
 static volatile int16_t  g_speed     = 0;           // clicks turned on encoder 2 while its button was held down
+static volatile uint8_t  g_reset     = 0;           // 1 = both buttons held for 5 seconds: reset colour / effect / speed / white mix
 static volatile uint8_t  g_event[2]  = {0, 0};      // 1 = short push, 2 = double click, 3 = long push
 static volatile uint8_t  g_addr      = 0x20;
 static volatile uint8_t  g_steps     = 4;           // quadrature transitions per click
@@ -90,6 +92,8 @@ static void encTask(void *) {
   uint8_t prev[2] = {3, 3};
   int8_t  acc[2]  = {0, 0};
   Btn     btn[2];
+  uint32_t bothT = 0;                                   // when both buttons were first held together (0 = not both held)
+  bool     bothDone = false;                            // reset already requested for this hold
   for (;;) {
     uint8_t v;
     if (mcpReadA(v)) {
@@ -111,6 +115,15 @@ static void encTask(void *) {
         }
         bool pressed = !((v >> (sh + 2)) & 1);        // switch to ground = pressed
         btnUpdate(btn[i], i, pressed, now, true);     // both encoders have a double click (encoder 1: colour 1 / colour 2; encoder 2: next saved colour pair)
+      }
+      // both buttons held together for 5 seconds = reset. While both are down neither button gives a click or long push of its own.
+      if (btn[0].stable && btn[1].stable) {
+        btn[0].turned = true; btn[1].turned = true;
+        if (!bothT) bothT = now;
+        else if (!bothDone && (now - bothT) >= 5000) { g_reset = 1; bothDone = true; }
+      } else {
+        bothT = 0;
+        if (!btn[0].stable && !btn[1].stable) bothDone = false;
       }
     }
     vTaskDelay(1);
@@ -746,15 +759,42 @@ class DigEncodersUsermod : public Usermod {
 
   // double click on encoder 2: next saved colour pair (colour 1 + colour 2), front and rear together. The colours are placed on the
   // hue wheel, so they are shown at full saturation. One dip of the lights confirms the change.
-  void nextPair() {
-    if (colPairs.empty()) return;
-    pairIdx = (pairIdx + 1) % (int)colPairs.size();
+  void selectPair(int idx) {
+    pairIdx = idx;
     ex1 = (int)(colPairs[pairIdx].c1 & 0xFFFFFF);      // the exact colours of the pair
     ex2 = (int)(colPairs[pairIdx].c2 & 0xFFFFFF);
     sHue  = rgbToHue(colPairs[pairIdx].c1);            // their positions on the wheel (used if a colour is moved afterwards)
     s2Hue = rgbToHue(colPairs[pairIdx].c2);
     s2Color = -1;
     colorSel = 0;
+  }
+
+  // both buttons held for 5 seconds: back to a known starting point. Effect = first of the favorite effects (Solid in your list),
+  // colours = the first saved colour pair (or the first favorite colour if there are no pairs), speed = middle, white mix = 0,
+  // and both front and rear on. Brightness is left alone. The lights dip three times to confirm.
+  void resetAll() {
+    if (fxIds.empty()) return;
+    uint8_t fx = fxIds[0];
+    mixPct = 0;
+    colorSel = 0;
+    heldBri = -1;
+    rearUserOn = true;
+    if (rearPercent == 0) rearPercent = 25;
+    if (!colPairs.empty()) selectPair(0);
+    else { ex1 = -1; ex2 = -1; sHue = -1; s2Hue = -1; s2Color = -1; sColor = 0; pairIdx = -1; }
+    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":128";
+    String j = "{\"seg\":[{\"id\":0,\"on\":true," + c + "}";
+    j += rearSegs(String(",") + c);
+    j += "]}";
+    sendJson(j);
+    blinkTotal = 600;
+    blinkUntil = millis() + blinkTotal;
+    lastChange = millis();
+  }
+
+  void nextPair() {
+    if (colPairs.empty()) return;
+    selectPair((pairIdx + 1) % (int)colPairs.size());
     blinkTotal = 200;
     blinkUntil = millis() + blinkTotal;
     lastChange = millis();
@@ -825,6 +865,7 @@ class DigEncodersUsermod : public Usermod {
       else if (e0 == 2) toggleColorSel();
       else if (e0 == 3) toggleOn(0);
     }
+    if (g_reset) { g_reset = 0; resetAll(); }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
     int16_t s1 = g_speed;
     if (s1) { g_speed = g_speed - s1; }   // (push and turn on encoder 2 does nothing; the count is simply discarded)
