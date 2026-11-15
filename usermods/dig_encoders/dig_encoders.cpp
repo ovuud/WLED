@@ -761,7 +761,7 @@ class DigEncodersUsermod : public Usermod {
   }
 
   // double click on encoder 2: next saved colour pair (colour 1 + colour 2), front and rear together. The colours are placed on the
-  // hue wheel, so they are shown at full saturation. One dip of the lights confirms the change.
+  // hue wheel. The change is not marked by a dip any more, so that the colours can fade smoothly.
   void selectPair(int idx) {
     pairIdx = idx;
     ex1 = (int)(colPairs[pairIdx].c1 & 0xFFFFFF);      // the exact colours of the pair
@@ -798,9 +798,7 @@ class DigEncodersUsermod : public Usermod {
   void nextPair() {
     if (colPairs.empty()) return;
     selectPair((pairIdx + 1) % (int)colPairs.size());
-    blinkTotal = 200;
-    blinkUntil = millis() + blinkTotal;
-    lastChange = millis();
+    lastChange = millis();                             // no dip: the colours fade over WLED's transition time
     sendColors();
   }
 
@@ -809,9 +807,7 @@ class DigEncodersUsermod : public Usermod {
     if (colPairs.empty()) return;
     int n = (int)colPairs.size();
     selectPair(pairIdx < 0 ? n - 1 : (pairIdx + n - 1) % n);
-    blinkTotal = 200;
-    blinkUntil = millis() + blinkTotal;
-    lastChange = millis();
+    lastChange = millis();                             // no dip: the colours fade over WLED's transition time
     sendColors();
   }
 
