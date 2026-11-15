@@ -711,13 +711,14 @@ class DigEncodersUsermod : public Usermod {
     segCmd(id, String("\"on\":") + (s.on ? "false" : "true"));
   }
 
-  void nextEffect() {
+  void nextEffect(int dir = 1) {                       // dir = 1: next favorite effect (encoder 1 short push), -1: previous one (WLED page button only)
     if (fxIds.empty()) return;
     Segment &f = frontSeg();
     size_t idx = 0;
     bool found = false;
     for (size_t i = 0; i < fxIds.size(); i++) if (fxIds[i] == f.mode) { idx = i; found = true; break; }
-    size_t next = found ? (idx + 1) % fxIds.size() : 0;
+    size_t n = fxIds.size();
+    size_t next = found ? (dir >= 0 ? (idx + 1) % n : (idx + n - 1) % n) : (dir >= 0 ? 0 : n - 1);
     uint8_t fx = fxIds[next];
     colorSel = 0;                                      // a new effect starts on colour 1
     String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx);
@@ -803,6 +804,17 @@ class DigEncodersUsermod : public Usermod {
     sendColors();
   }
 
+  // WLED page button only: the pair before the current one (the first double click on encoder 2 goes forward, this goes back)
+  void prevPair() {
+    if (colPairs.empty()) return;
+    int n = (int)colPairs.size();
+    selectPair(pairIdx < 0 ? n - 1 : (pairIdx + n - 1) % n);
+    blinkTotal = 200;
+    blinkUntil = millis() + blinkTotal;
+    lastChange = millis();
+    sendColors();
+  }
+
   // runs about 60 times per second: both rear strips always copy the front
   void syncRear() {
     if (!haveRear()) return;
@@ -875,6 +887,8 @@ class DigEncodersUsermod : public Usermod {
       else if (w == 3) cycleSpeed();
       else if (w == 4) toggleColorSel();
       else if (w == 5) resetAll();
+      else if (w == 6) prevPair();
+      else if (w == 7) nextEffect(-1);
     }
     // ---- encoder 2: white mix / quick palette change / rear on-off ----
     int16_t s1 = g_speed;
@@ -1013,6 +1027,8 @@ class DigEncodersUsermod : public Usermod {
     else if (!strcmp(c, "speed"))  webCmd = 3;     // = encoder 2 short push
     else if (!strcmp(c, "select")) webCmd = 4;     // = encoder 1 double click
     else if (!strcmp(c, "reset"))  webCmd = 5;     // = both buttons held for 5 seconds
+    else if (!strcmp(c, "prevpair")) webCmd = 6;   // previous colour pair (no knob does this)
+    else if (!strcmp(c, "preveffect")) webCmd = 7; // previous effect (no knob does this)
   }
 
   bool readFromConfig(JsonObject &root) override {
