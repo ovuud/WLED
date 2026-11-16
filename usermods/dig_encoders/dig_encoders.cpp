@@ -158,6 +158,7 @@ class DigEncodersUsermod : public Usermod {
   String favPalettes    = "6,7,8,9,10,11,12,13,14,22,35,36,44,45,46,50";
   String effectSpeed    = "Fade=10,Wipe=25,Frizzles=25,Colorwaves=15";               // Name=percent: the speed an effect starts at when you step to it (all other effects use defaultSpeedPercent)
   int    defaultSpeedPct = 50;                       // speed in percent for every effect that is not listed in effectSpeed
+  String effectIntensity = "";                       // Name=percent: the intensity (the flame slider, "spread" on some effects) an effect starts at when you step to it; effects not listed keep their intensity
   String colorPairs     = "";                      // saved colour pairs, RRGGBB+RRGGBB separated by commas; double click on encoder 2 steps through them
   String effectColors   = "";                    // optional fixed pairs: Name=RRGGBB+RRGGBB, separate entries with commas
   String effectHueShift = "Wipe=15";               // Name=degrees: colour 2 = the chosen colour turned this many degrees clockwise on the wheel
@@ -193,6 +194,7 @@ class DigEncodersUsermod : public Usermod {
   std::vector<FxPair> fxPairs;
   struct FxSpeed { uint8_t fx; int pct; };
   std::vector<FxSpeed> fxSpeeds;
+  std::vector<FxSpeed> fxIntens;                   // same layout: effect and intensity percent
   struct ColPair { uint32_t c1, c2; };
   std::vector<ColPair> colPairs;
   int pairIdx = -1;                                // which saved colour pair was used last (-1 = none yet)
@@ -332,6 +334,23 @@ class DigEncodersUsermod : public Usermod {
       int pct = constrain(tok.substring(eq + 1).toInt(), 0, 100);
       for (uint8_t i = 0; i < strip.getModeCount(); i++) {
         if (name.equalsIgnoreCase(modeName(i))) { fxSpeeds.push_back({i, pct}); break; }
+      }
+    }
+    // starting intensity per effect, written as  Name=percent
+    fxIntens.clear();
+    from = 0;
+    list = effectIntensity + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String tok = list.substring(from, to);
+      from = to + 1;
+      int eq = tok.indexOf('=');
+      if (eq < 1) continue;
+      String name = tok.substring(0, eq); name.trim();
+      int pct = constrain(tok.substring(eq + 1).toInt(), 0, 100);
+      for (uint8_t i = 0; i < strip.getModeCount(); i++) {
+        if (name.equalsIgnoreCase(modeName(i))) { fxIntens.push_back({i, pct}); break; }
       }
     }
     // saved colour pairs to click through (double click on encoder 2), written as  RRGGBB+RRGGBB, separated by commas
@@ -739,6 +758,12 @@ class DigEncodersUsermod : public Usermod {
     return (pct * 255 + 50) / 100;
   }
 
+  // ,"ix":N for an effect that has its own starting intensity in effectIntensity, otherwise nothing (the intensity is left as it is)
+  String intensityJsonFor(uint8_t fx) {
+    for (auto &p : fxIntens) if (p.fx == fx) return String(",\"ix\":") + String((constrain(p.pct, 0, 100) * 255 + 50) / 100);
+    return "";
+  }
+
   void nextEffect(int dir = 1) {                       // dir = 1: next favorite effect (encoder 1 short push), -1: previous one (WLED page button only)
     if (fxIds.empty()) return;
     Segment &f = frontSeg();
@@ -749,7 +774,7 @@ class DigEncodersUsermod : public Usermod {
     size_t next = found ? (dir >= 0 ? (idx + 1) % n : (idx + n - 1) % n) : (dir >= 0 ? 0 : n - 1);
     uint8_t fx = fxIds[next];
     colorSel = 0;                                      // a new effect starts on colour 1
-    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":" + String(speedFor(fx));
+    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":" + String(speedFor(fx)) + intensityJsonFor(fx);
     String j = "{\"seg\":[{\"id\":0," + c + "}";
     j += rearSegs(String(",") + c);
     j += "]}";
@@ -813,7 +838,7 @@ class DigEncodersUsermod : public Usermod {
     if (rearPercent == 0) rearPercent = 25;
     if (!colPairs.empty()) selectPair(0);
     else { ex1 = -1; ex2 = -1; sHue = -1; s2Hue = -1; s2Color = -1; sColor = 0; pairIdx = -1; }
-    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":" + String(speedFor(fx));
+    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":" + String(speedFor(fx)) + intensityJsonFor(fx);
     String j = "{\"seg\":[{\"id\":0,\"on\":true," + c + "}";
     j += rearSegs(String(",") + c);
     j += "]}";
@@ -1024,6 +1049,7 @@ class DigEncodersUsermod : public Usermod {
     top["effectColors"] = effectColors;
     top["colorPairs"] = colorPairs;
     top["effectSpeed"] = effectSpeed;
+    top["effectIntensity"] = effectIntensity;
     top["defaultSpeedPercent"] = defaultSpeedPct;
     top["effectHueShift"] = effectHueShift;
     top["stockColorEffects"] = stockColorEffects;
@@ -1088,6 +1114,7 @@ class DigEncodersUsermod : public Usermod {
     if (ec[0]) effectColors = ec;
     if (!top["effectSpeed"].isNull()) { const char *es = top["effectSpeed"]; if (es) effectSpeed = es; }
     defaultSpeedPct = top["defaultSpeedPercent"] | defaultSpeedPct;
+    if (!top["effectIntensity"].isNull()) { const char *ei = top["effectIntensity"]; if (ei) effectIntensity = ei; }
     if (!top["colorPairs"].isNull()) { const char *cp = top["colorPairs"]; if (cp) colorPairs = cp; }
     const char *eh = top["effectHueShift"] | "";
     if (eh[0]) effectHueShift = eh;
