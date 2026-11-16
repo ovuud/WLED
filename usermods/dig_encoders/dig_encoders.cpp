@@ -156,6 +156,8 @@ class DigEncodersUsermod : public Usermod {
   bool   forceSegments  = true; // rebuild the two segments at every boot (needs the 2D matrix set up)
   String favEffects     = "Wipe,Colorloop,Rainbow,Palette,Aurora,Fire 2012,Plasma,Noise2D,Soap,Lissajous,Matrix,Game Of Life,Waving Cell,Plasma Ball,Distortion Waves,Blobs,Drift,Drift Rose,Julia,Squared Swirl,Ghost Rider,Hiphotic,Polar Lights,Sun Radiation,Washing Machine";
   String favPalettes    = "6,7,8,9,10,11,12,13,14,22,35,36,44,45,46,50";
+  String effectSpeed    = "Fade=10,Wipe=25,Frizzles=25,Colorwaves=15";               // Name=percent: the speed an effect starts at when you step to it (all other effects use defaultSpeedPercent)
+  int    defaultSpeedPct = 50;                       // speed in percent for every effect that is not listed in effectSpeed
   String colorPairs     = "";                      // saved colour pairs, RRGGBB+RRGGBB separated by commas; double click on encoder 2 steps through them
   String effectColors   = "";                    // optional fixed pairs: Name=RRGGBB+RRGGBB, separate entries with commas
   String effectHueShift = "Wipe=15";               // Name=degrees: colour 2 = the chosen colour turned this many degrees clockwise on the wheel
@@ -189,6 +191,8 @@ class DigEncodersUsermod : public Usermod {
   std::vector<uint32_t> colIds;
   struct FxPair { uint8_t fx; uint32_t c1, c2; };
   std::vector<FxPair> fxPairs;
+  struct FxSpeed { uint8_t fx; int pct; };
+  std::vector<FxSpeed> fxSpeeds;
   struct ColPair { uint32_t c1, c2; };
   std::vector<ColPair> colPairs;
   int pairIdx = -1;                                // which saved colour pair was used last (-1 = none yet)
@@ -311,6 +315,23 @@ class DigEncodersUsermod : public Usermod {
           fxPairs.push_back({i, (uint32_t)strtoul(a.c_str(), nullptr, 16), (uint32_t)strtoul(b.c_str(), nullptr, 16)});
           break;
         }
+      }
+    }
+    // starting speed per effect, written as  Name=percent
+    fxSpeeds.clear();
+    from = 0;
+    list = effectSpeed + ",";
+    while (true) {
+      int to = list.indexOf(',', from);
+      if (to < 0) break;
+      String tok = list.substring(from, to);
+      from = to + 1;
+      int eq = tok.indexOf('=');
+      if (eq < 1) continue;
+      String name = tok.substring(0, eq); name.trim();
+      int pct = constrain(tok.substring(eq + 1).toInt(), 0, 100);
+      for (uint8_t i = 0; i < strip.getModeCount(); i++) {
+        if (name.equalsIgnoreCase(modeName(i))) { fxSpeeds.push_back({i, pct}); break; }
       }
     }
     // saved colour pairs to click through (double click on encoder 2), written as  RRGGBB+RRGGBB, separated by commas
@@ -711,6 +732,13 @@ class DigEncodersUsermod : public Usermod {
     segCmd(id, String("\"on\":") + (s.on ? "false" : "true"));
   }
 
+  // the speed (0..255) an effect starts at when it is stepped to: its own percentage from effectSpeed, else defaultSpeedPercent
+  int speedFor(uint8_t fx) {
+    int pct = constrain(defaultSpeedPct, 0, 100);
+    for (auto &p : fxSpeeds) if (p.fx == fx) { pct = p.pct; break; }
+    return (pct * 255 + 50) / 100;
+  }
+
   void nextEffect(int dir = 1) {                       // dir = 1: next favorite effect (encoder 1 short push), -1: previous one (WLED page button only)
     if (fxIds.empty()) return;
     Segment &f = frontSeg();
@@ -721,7 +749,7 @@ class DigEncodersUsermod : public Usermod {
     size_t next = found ? (dir >= 0 ? (idx + 1) % n : (idx + n - 1) % n) : (dir >= 0 ? 0 : n - 1);
     uint8_t fx = fxIds[next];
     colorSel = 0;                                      // a new effect starts on colour 1
-    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx);
+    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":" + String(speedFor(fx));
     String j = "{\"seg\":[{\"id\":0," + c + "}";
     j += rearSegs(String(",") + c);
     j += "]}";
@@ -773,7 +801,7 @@ class DigEncodersUsermod : public Usermod {
   }
 
   // both buttons held for 5 seconds: back to a known starting point. Effect = first of the favorite effects (Solid in your list),
-  // colours = the first saved colour pair (or the first favorite colour if there are no pairs), speed = middle, white mix = 0,
+  // colours = the first saved colour pair (or the first favorite colour if there are no pairs), speed = that effect's starting speed, white mix = 0,
   // and both front and rear on. Brightness is left alone. The lights dip three times to confirm.
   void resetAll() {
     if (fxIds.empty()) return;
@@ -785,7 +813,7 @@ class DigEncodersUsermod : public Usermod {
     if (rearPercent == 0) rearPercent = 25;
     if (!colPairs.empty()) selectPair(0);
     else { ex1 = -1; ex2 = -1; sHue = -1; s2Hue = -1; s2Color = -1; sColor = 0; pairIdx = -1; }
-    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":128";
+    String c = String("\"fx\":") + String((int)fx) + ",\"pal\":" + String(palForFx(fx)) + colJsonFor(fx) + ",\"sx\":" + String(speedFor(fx));
     String j = "{\"seg\":[{\"id\":0,\"on\":true," + c + "}";
     j += rearSegs(String(",") + c);
     j += "]}";
@@ -995,6 +1023,8 @@ class DigEncodersUsermod : public Usermod {
     top["favoriteColors"] = favColors;
     top["effectColors"] = effectColors;
     top["colorPairs"] = colorPairs;
+    top["effectSpeed"] = effectSpeed;
+    top["defaultSpeedPercent"] = defaultSpeedPct;
     top["effectHueShift"] = effectHueShift;
     top["stockColorEffects"] = stockColorEffects;
     top["effectPalette"] = effectPalette;
@@ -1056,6 +1086,8 @@ class DigEncodersUsermod : public Usermod {
     if (fc[0]) favColors = fc;
     const char *ec = top["effectColors"] | "";
     if (ec[0]) effectColors = ec;
+    if (!top["effectSpeed"].isNull()) { const char *es = top["effectSpeed"]; if (es) effectSpeed = es; }
+    defaultSpeedPct = top["defaultSpeedPercent"] | defaultSpeedPct;
     if (!top["colorPairs"].isNull()) { const char *cp = top["colorPairs"]; if (cp) colorPairs = cp; }
     const char *eh = top["effectHueShift"] | "";
     if (eh[0]) effectHueShift = eh;
